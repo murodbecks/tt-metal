@@ -58,7 +58,7 @@ inline std::uint32_t eltwise_binary_func(std::uint8_t EN_DST_ACC)
  * @return Encoded TT instruction word.
  */
 template <EltwiseBinaryType ELTWISE_BINARY_TYPE>
-inline std::uint32_t eltwise_di_binary_func(
+inline void eltwise_di_binary_func(
     std::uint8_t CLR_SRC,
     std::uint8_t EN_DST_ACCUM,
     std::uint8_t SRCB_BROADCAST_TYPE,
@@ -70,15 +70,15 @@ inline std::uint32_t eltwise_di_binary_func(
     std::uint8_t INSTR_MOD = ((SRCB_BROADCAST_TYPE << 0) | (EN_DST_ACCUM << 2));
     if constexpr (ELTWISE_BINARY_TYPE == EltwiseBinaryType::ELWADD)
     {
-        return TT_ELWADDDI(CLR_SRC, INSTR_MOD, SRCB_ADDR, SRCA_ADDR, ADDR_MOD, DST_ADDR);
+        TT_ELWADDDI(CLR_SRC, INSTR_MOD, SRCB_ADDR, SRCA_ADDR, ADDR_MOD, DST_ADDR);
     }
     else if constexpr (ELTWISE_BINARY_TYPE == EltwiseBinaryType::ELWSUB)
     {
-        return TT_ELWSUBDI(CLR_SRC, INSTR_MOD, SRCB_ADDR, SRCA_ADDR, ADDR_MOD, DST_ADDR);
+        TT_ELWSUBDI(CLR_SRC, INSTR_MOD, SRCB_ADDR, SRCA_ADDR, ADDR_MOD, DST_ADDR);
     }
     else
     {
-        return TT_ELWMULDI(CLR_SRC, INSTR_MOD, SRCB_ADDR, SRCA_ADDR, ADDR_MOD, DST_ADDR);
+        TT_ELWMULDI(CLR_SRC, INSTR_MOD, SRCB_ADDR, SRCA_ADDR, ADDR_MOD, DST_ADDR);
     }
 }
 
