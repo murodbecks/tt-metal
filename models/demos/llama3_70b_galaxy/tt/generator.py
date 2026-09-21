@@ -310,6 +310,7 @@ class Generator(WarmupForwardMixin):
         sampling_parameters_sweeped = False
 
         self.model.switch_mode("prefill")
+        self._log_l1_probe("prefill warmup sweep start")
         logger.info("Warming up prefill for all supported sequence lengths up to max sequence length")
         warmup_sequence_lengths = get_prefill_warmup_sequence_lengths(self.model.args.max_seq_len)
         block_size = get_block_size(kv_cache[0]) if kv_cache else 64
@@ -1680,7 +1681,9 @@ class Generator(WarmupForwardMixin):
             # Galaxy's throughput demo shards both inputs; the serving warmup
             # uses the default interleaved inputs with the same page-table shape.
             input_layouts.append((True, True))
+        self._log_l1_probe("before decode preparation")
         self.model.switch_mode("decode")
+        self._log_l1_probe("after switch_mode(decode)")
         logger.info("Preparing decode before prefill trace capture")
         for is_cur_pos_sharded, is_page_table_sharded in input_layouts:
             key = self._decode_preparation_key(page_table, on_device_logits, is_cur_pos_sharded, is_page_table_sharded)
@@ -1700,7 +1703,39 @@ class Generator(WarmupForwardMixin):
                     # These L1 buffers collide with prefill's static circular
                     # buffers. Keep the compiled programs, not the warmup inputs.
                     self._prepared_decode_traces[key] = None
+        self._log_l1_probe("after decode compile (decode mode)")
+        decode_setup = self.model.prefetcher_setup
         self.model.switch_mode("prefill")
+        self._log_l1_probe("after switch_mode(prefill)")
+        import gc
+
+        gc.collect()
+        self._log_l1_probe("after gc.collect()")
+        if decode_setup is not None:
+            refs = [r for r in gc.get_referrers(decode_setup) if not isinstance(r, dict) or r is not locals()]
+            logger.info(f"[L1 probe] decode prefetcher_setup referrers: {[type(r).__name__ for r in refs]}")
+            for r in refs:
+                if isinstance(r, dict):
+                    owners = [
+                        type(o).__name__
+                        for o in gc.get_referrers(r)
+                        if hasattr(o, "__dict__") and getattr(o, "__dict__", None) is r
+                    ]
+                    keys = [k for k, v in r.items() if v is decode_setup]
+                    logger.info(f"[L1 probe]   dict keys={keys} owners={owners}")
+            cb = getattr(decode_setup, "global_circular_buffer", None)
+            logger.info(f"[L1 probe] decode global_circular_buffer alive={cb is not None}")
+        decode_setup = None
+        gc.collect()
+        self._log_l1_probe("after dropping probe ref")
+
+    def _log_l1_probe(self, tag):
+        mv = ttnn.get_memory_view(self.mesh_device, ttnn.BufferType.L1)
+        logger.info(
+            f"[L1 probe] {tag}: allocated_per_bank={mv.total_bytes_allocated_per_bank} "
+            f"free_per_bank={mv.total_bytes_free_per_bank} "
+            f"largest_free={mv.largest_contiguous_bytes_free_per_bank}"
+        )
 
     def _prepare_trace_decode(
         self,
