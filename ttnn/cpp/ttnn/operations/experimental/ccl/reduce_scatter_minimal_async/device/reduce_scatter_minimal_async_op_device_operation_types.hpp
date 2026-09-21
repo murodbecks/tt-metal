@@ -48,9 +48,6 @@ struct ReduceScatterMinimalAsyncParams {
     std::optional<uint32_t> num_buffers_per_channel;
     std::optional<ttnn::DeviceComputeKernelConfig> compute_kernel_config;
 
-    std::optional<ttnn::MeshShape> mesh_shape;
-    std::vector<tt::tt_fabric::FabricNodeId> fabric_nodes;
-
     // Compile-time attributes drive the default program-cache reflection hash and the canonical key
     static constexpr auto attribute_names = std::forward_as_tuple(
         "dim",
@@ -66,24 +63,23 @@ struct ReduceScatterMinimalAsyncParams {
         "chunks_per_sync",
         "num_workers_per_link",
         "num_buffers_per_channel",
-        "compute_kernel_config",
-        "mesh_shape",
-        "fabric_nodes");
+        "compute_kernel_config");
     auto attribute_values() const {
-        // Reference stored attributes; the computed presence flag must remain an owned value.
-        return std::tuple_cat(
-            std::tie(dim, num_links, ring_size, output_mem_config, optional_intermediate_mem_config, topology),
-            std::make_tuple(barrier_semaphore.has_value()),
-            std::tie(
-                using_persistent_buffers,
-                sub_device_id,
-                cluster_axis,
-                chunks_per_sync,
-                num_workers_per_link,
-                num_buffers_per_channel,
-                compute_kernel_config,
-                mesh_shape,
-                fabric_nodes));
+        return std::make_tuple(
+            dim,
+            num_links,
+            ring_size,
+            output_mem_config,
+            optional_intermediate_mem_config,
+            topology,
+            barrier_semaphore.has_value(),
+            using_persistent_buffers,
+            sub_device_id,
+            cluster_axis,
+            chunks_per_sync,
+            num_workers_per_link,
+            num_buffers_per_channel,
+            compute_kernel_config);
     }
 };
 
