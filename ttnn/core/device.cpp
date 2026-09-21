@@ -10,6 +10,7 @@
 #include <tt-logger/tt-logger.hpp>
 
 #include <mutex>
+#include <unordered_set>
 
 namespace ttnn {
 
@@ -100,24 +101,27 @@ namespace {
 // inspecting it, including while nanobind resolves the returned object's dynamic type.
 std::mutex default_device_mutex;
 std::weak_ptr<MeshDevice> default_device;
+// Mesh ids already reported as closed by SetDefaultDevice, so a caller that keeps retrying
+// (or a tight loop such as the concurrent regression test) logs once per mesh.
+std::unordered_set<int> warned_closed_mesh_ids;
 }  // namespace
 
 void SetDefaultDevice(MeshDevice* dev) {
     std::weak_ptr<MeshDevice> candidate;
-    if (dev != nullptr) {
-        if (dev->is_closed()) {
-            // Silent acceptance would surface much later as "no default device" in an unrelated op.
-            log_warning(
-                tt::LogAlways,
-                "SetDefaultDevice: mesh device {} is closed or belongs to a closed mesh; clearing the default device "
-                "instead of registering it",
-                dev->id());
-        } else {
-            candidate = dev->weak_from_this();
-        }
+    const bool rejected_closed = dev != nullptr && dev->is_closed();
+    if (dev != nullptr && !rejected_closed) {
+        candidate = dev->weak_from_this();
     }
     std::lock_guard lock(default_device_mutex);
     default_device = std::move(candidate);
+    // Silent acceptance would surface much later as "no default device" in an unrelated op.
+    if (rejected_closed && warned_closed_mesh_ids.insert(dev->id()).second) {
+        log_warning(
+            tt::LogAlways,
+            "SetDefaultDevice: mesh device {} is closed or belongs to a closed mesh; clearing the default device "
+            "instead of registering it (reported once per mesh)",
+            dev->id());
+    }
 }
 
 std::shared_ptr<MeshDevice> GetDefaultDevice() {
