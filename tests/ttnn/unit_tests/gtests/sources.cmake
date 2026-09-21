@@ -13,6 +13,7 @@ set(UNIT_TESTS_TTNN_SMOKE_SOURCES
 )
 
 set(UNIT_TESTS_TTNN_BASIC_SOURCES
+    test_default_device.cpp
     test_add.cpp
     test_scalar_lhs_binary.cpp
     test_add_int.cpp

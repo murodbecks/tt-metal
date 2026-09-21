@@ -77,7 +77,11 @@ class MeshDevice : public IDevice, public std::enable_shared_from_this<MeshDevic
     friend class tt::tt_metal::MetalEnv;
 
 private:
-    MeshDevice() = default;
+    struct LifetimeState;
+    const std::shared_ptr<LifetimeState> lifetime_;
+
+    MeshDevice();
+    explicit MeshDevice(std::shared_ptr<const LifetimeState> parent_lifetime);
     // [[Experimental]] Creates a MeshDevice that uses the given MetalEnv instance.
     // This is used by MetalEnv::create_mesh_device and MetalEnv::create_unit_mesh_device.
     explicit MeshDevice(MetalEnv& metal_env);
@@ -99,6 +103,10 @@ public:
     ChipId build_id() const override;
     uint8_t num_hw_cqs() const override;
     bool is_initialized() const override;
+
+    // Safe to query concurrently with close(). True once this mesh or any ancestor has
+    // committed to teardown. Device operations must still be synchronized with explicit close.
+    bool is_closed() const;
 
     int num_dram_channels() const override;
     uint32_t l1_size_per_core() const override;

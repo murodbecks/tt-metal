@@ -43,17 +43,21 @@ void deallocate_buffers(IDevice* device);
 
 /**
  * Sets the default device to be used for auto-formatting operations
- * @param dev Pointer to the device to be used
+ * @param dev Pointer kept alive by the caller for this call; nullptr clears the default.
+ * Closed devices and descendants of closed meshes are treated as nullptr.
+ * Registration does not keep the device alive.
  * @note This functionality is planned for deprecation in the future.
  */
 void SetDefaultDevice(MeshDevice* dev);
 
 /**
  * Gets the default device used for auto-formatting operations
- * @return Pointer to the default device
+ * @return Owning handle to the default device, or nullptr after closure or destruction.
+ * Retain the handle while using the device. Explicit close must still be synchronized
+ * with device operations; this handle only protects against object destruction.
  * @note This functionality is planned for deprecation in the future.
  */
-MeshDevice* GetDefaultDevice();
+std::shared_ptr<MeshDevice> GetDefaultDevice();
 
 }  // namespace device
 

@@ -584,13 +584,13 @@ Tensor outer(const Tensor& input_a, const Tensor& input_b, const std::optional<M
     a_slim = ttnn::operations::experimental::quasar::to_layout(a_slim, ttnn::TILE_LAYOUT);
     b_slim = ttnn::operations::experimental::quasar::to_layout(b_slim, ttnn::TILE_LAYOUT);
 
-    auto* device = ttnn::GetDefaultDevice();
+    auto device = ttnn::GetDefaultDevice();
     if (device != nullptr) {
         if (a_slim.storage_type() != ttnn::StorageType::DEVICE) {
-            a_slim = a_slim.to_device(device);
+            a_slim = a_slim.to_device(device.get());
         }
         if (b_slim.storage_type() != ttnn::StorageType::DEVICE) {
-            b_slim = b_slim.to_device(device);
+            b_slim = b_slim.to_device(device.get());
         }
     }
 

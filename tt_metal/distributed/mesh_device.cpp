@@ -87,6 +87,16 @@ struct ProgramCache;
 }  // namespace tt::tt_metal
 
 namespace tt::tt_metal::distributed {
+
+// Keep ancestor close state without retaining the ancestor's device resources or reading
+// parent_mesh_, which is released during close. The links never change after construction.
+struct MeshDevice::LifetimeState {
+    explicit LifetimeState(std::shared_ptr<const LifetimeState> parent) : parent(std::move(parent)) {}
+
+    std::atomic<bool> closed{false};
+    const std::shared_ptr<const LifetimeState> parent;
+};
+
 namespace {
 
 int generate_unique_mesh_id() {
@@ -747,7 +757,7 @@ std::shared_ptr<MeshDevice> MeshDeviceImpl::create_submesh(
         submesh_fabric_node_ids.push_back(view_->get_fabric_node_id(coord));
     }
 
-    auto submesh = std::shared_ptr<MeshDevice>(new MeshDevice());
+    auto submesh = std::shared_ptr<MeshDevice>(new MeshDevice(parent_mesh->lifetime_));
     submesh->pimpl_ = std::make_unique<MeshDeviceImpl>(
         scoped_devices_,
         std::make_unique<MeshDeviceView>(submesh_shape, submesh_devices, submesh_fabric_node_ids),
@@ -1024,11 +1034,6 @@ bool MeshDeviceImpl::close_impl(MeshDevice* pimpl_wrapper) {
             distributed_context_->barrier();
         }
 
-        // TODO #20966: Remove these calls
-        for (auto* device : view_->get_devices()) {
-            dynamic_cast<Device*>(device)->set_mesh_device(parent_mesh_);
-        }
-
         // Only one mesh device can use a CQ on a physical device at a time, or else teardown or some other operation
         // will hang. Validate this.
         for (uint32_t cq_id = 0; cq_id < mesh_command_queues_.size(); cq_id++) {
@@ -1058,6 +1063,17 @@ bool MeshDeviceImpl::close_impl(MeshDevice* pimpl_wrapper) {
                     }
                 }
             }
+        }
+    }
+
+    // Validation failures above leave the mesh usable. After this point teardown can
+    // release resources even if a later step throws, so never publish the mesh again.
+    pimpl_wrapper->lifetime_->closed.store(true);
+
+    if (is_initialized()) {
+        // TODO #20966: Remove these calls
+        for (auto* device : view_->get_devices()) {
+            dynamic_cast<Device*>(device)->set_mesh_device(parent_mesh_);
         }
 
         for (auto* device : view_->get_devices()) {
@@ -1983,7 +1999,21 @@ std::shared_ptr<distributed::MeshDevice> MeshDeviceImpl::get_mesh_device() {
     return nullptr;
 }
 
-MeshDevice::MeshDevice(MetalEnv& /*metal_env*/) {}
+MeshDevice::MeshDevice() : MeshDevice(std::shared_ptr<const LifetimeState>{}) {}
+
+MeshDevice::MeshDevice(std::shared_ptr<const LifetimeState> parent_lifetime) :
+    lifetime_(std::make_shared<LifetimeState>(std::move(parent_lifetime))) {}
+
+MeshDevice::MeshDevice(MetalEnv& /*metal_env*/) : MeshDevice() {}
+
+bool MeshDevice::is_closed() const {
+    for (const auto* state = lifetime_.get(); state != nullptr; state = state->parent.get()) {
+        if (state->closed.load()) {
+            return true;
+        }
+    }
+    return false;
+}
 
 MeshDevice::~MeshDevice() {
     Inspector::mesh_device_destroyed(this->pimpl_.get());
