@@ -1728,6 +1728,34 @@ class Generator(WarmupForwardMixin):
         decode_setup = None
         gc.collect()
         self._log_l1_probe("after dropping probe ref")
+        self._dump_l1_blocks("decode_prep_done")
+
+    def _dump_l1_blocks(self, tag):
+        import glob
+        import os
+
+        prefix = f"probe_{tag}_"
+        ttnn.dump_device_memory_state(self.mesh_device, prefix)
+        paths = glob.glob(f"**/{prefix}detailed_memory_usage.csv", recursive=True)
+        paths += glob.glob(
+            os.path.join(
+                os.environ.get("TT_METAL_HOME", "."), "generated", "reports", f"{prefix}detailed_memory_usage.csv"
+            )
+        )
+        logger.info(f"[L1 probe] dump files for {tag}: {paths}")
+        for path in paths[:1]:
+            lines = open(path).read().splitlines()
+            # Print the L1 section of the first bank only (banks are lockstep).
+            out = []
+            in_l1 = False
+            for line in lines:
+                if line.strip(",") in ("L1",) or line.endswith(",L1"):
+                    in_l1 = True
+                if in_l1:
+                    out.append(line)
+                    if len(out) > 80:
+                        break
+            logger.info("[L1 probe] " + " | ".join(out))
 
     def _log_l1_probe(self, tag):
         mv = ttnn.get_memory_view(self.mesh_device, ttnn.BufferType.L1)
@@ -1760,11 +1788,13 @@ class Generator(WarmupForwardMixin):
             on_device_logits=on_device_logits,
         )
         logger.info("Done Compiling Model")
+        self._log_l1_probe("after decode compile run")
 
         # Get inputs ready for trace run
         tokens_tt, current_pos_tt, rope_idxs_tt, page_table_tt = self.model.prepare_inputs_decode(
             tokens, current_pos, page_table, is_cur_pos_sharded, is_page_table_sharded
         )
+        self._log_l1_probe("after prepare_inputs_decode")
 
         # Pre-compile the sampling pipeline HERE: after the trace inputs are staged, but before
         # begin_trace_capture -- i.e. while no trace is live.
@@ -1786,6 +1816,13 @@ class Generator(WarmupForwardMixin):
             if compile_logits is not None:
                 logger.info("Pre-compiling sampling path before decode trace capture")
                 sampling_module.precompile(logits=compile_logits, tt_out_tok=tokens_tt, all_configs=True)
+                self._log_l1_probe("after sampling precompile")
+        compile_out = None
+        compile_logits = None
+        import gc
+
+        gc.collect()
+        self._log_l1_probe("after dropping compile outputs")
 
         return tokens_tt, current_pos_tt, rope_idxs_tt, page_table_tt
 
