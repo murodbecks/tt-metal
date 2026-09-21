@@ -51,7 +51,8 @@ class PrefetcherPipeSpaceImpl;
  *   auto space = CreatePrefetcherPipeSpace(device, {.sender_cores = ..., .receiver_domain = ...,
  *                                                   .ring_size = R, .max_receivers_per_pipe = N});
  *   PrefetcherPipe pipe = space.create_pipe(sender_core, receiver_cores);
- *   // ProgramSpec declares a PrefetcherPipeParameter with the same geometry; kernels bind it via
+ *   // ProgramSpec declares a PrefetcherPipeParameter with the same receivers / ring size (the
+ *   // sender is the pipe's, not the spec's); kernels bind it via
  *   // KernelSpec::prefetcher_pipe_bindings; ProgramRunArgs::prefetcher_pipe_args supplies `pipe`.
  *
  * Device kernel flows (sender / receiver / relay) are documented on the device API:

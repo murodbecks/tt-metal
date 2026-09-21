@@ -221,7 +221,9 @@ void RejectPrefetcherPipeRelayResize(
 // (UpdateProgramRunArgs; require_all=false).
 //   - Every entry references a PrefetcherPipeParameter declared in the ProgramSpec.
 //   - The supplied pipe lives on the MeshDevice the Program was built for.
-//   - The supplied pipe's geometry (sender node, receiver nodes, ring size) matches the parameter's.
+//   - The supplied pipe's geometry (receiver nodes, ring size) matches the parameter's. The spec
+//     names no sender; when this Program runs the sender kernel, the pipe's sender must be one of
+//     that kernel's nodes, which the bind checks per slot.
 //   - The binding is sticky: a parameter already bound to a different pipe object is rejected
 //     (re-supplying the same object is a no-op).
 //   - When require_all is true: every declared parameter must be supplied, unless it is already
@@ -256,15 +258,6 @@ void ValidatePrefetcherPipeArgs(
             "is bound to. A Program binds a parameter to one pipe for its lifetime; build a new Program to use "
             "another pipe.",
             param_name);
-        TT_FATAL(
-            pipe.sender_core() == binding->sender,
-            "PrefetcherPipeArgument for '{}' supplies a pipe whose sender node ({},{}) differs from the declared "
-            "sender ({},{}).",
-            param_name,
-            pipe.sender_core().x,
-            pipe.sender_core().y,
-            binding->sender.x,
-            binding->sender.y);
         TT_FATAL(
             pipe.receiver_cores().num_cores() == binding->receivers.num_cores() &&
                 pipe.receiver_cores().intersection(binding->receivers).num_cores() == binding->receivers.num_cores(),

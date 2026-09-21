@@ -160,14 +160,9 @@ m2::WorkUnitSpec work_unit(const std::string& name, const std::vector<std::strin
 }
 
 m2::PrefetcherPipeParameter pipe_parameter(
-    const m2::PrefetcherPipeParamName& name,
-    CoreCoord sender,
-    const CoreRangeSet& receivers,
-    uint32_t ring_size,
-    uint32_t entry_size) {
+    const m2::PrefetcherPipeParamName& name, const CoreRangeSet& receivers, uint32_t ring_size, uint32_t entry_size) {
     return m2::PrefetcherPipeParameter{
         .unique_id = name,
-        .sender = sender,
         .receivers = receivers,
         .ring_size = ring_size,
         .entry_size = entry_size,
@@ -177,7 +172,7 @@ m2::PrefetcherPipeParameter pipe_parameter(
 // The parameter describing `pipe`, consumed at `entry_size`.
 m2::PrefetcherPipeParameter pipe_parameter(
     const m2::PrefetcherPipeParamName& name, const m2::PrefetcherPipe& pipe, uint32_t entry_size) {
-    return pipe_parameter(name, pipe.sender_core(), pipe.receiver_cores(), pipe.ring_size(), entry_size);
+    return pipe_parameter(name, pipe.receiver_cores(), pipe.ring_size(), entry_size);
 }
 
 void bind_pipe(m2::KernelSpec& kernel, std::vector<m2::PrefetcherPipeParamName> pipes, const std::string& accessor) {

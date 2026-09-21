@@ -129,8 +129,10 @@ struct ProgramRunArgs {
     //  It MAY be omitted when calling UpdateProgramRunArgs.
     //
     // The supplied pipe MUST live on the MeshDevice the Program was built for, and its geometry
-    // (sender, receivers, ring size) MUST match the parameter's; its ring must accommodate the
-    // parameter's entry_size. A Program binds a given parameter to one pipe object for its lifetime:
+    // (receivers, ring size) MUST match the parameter's; its ring must accommodate the parameter's
+    // entry_size. When this Program runs the pipe's sender kernel, the pipe's sender MUST be one of
+    // that kernel's nodes (a consumer-only Program never sees the sender, which may be a DRAM
+    // core). A Program binds a given parameter to one pipe object for its lifetime:
     // re-supplying the same pipe is a no-op, supplying a different one is rejected.
     //
     // Binding is all-or-nothing per call: every supplied pipe is checked before any is bound, so a

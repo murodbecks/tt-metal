@@ -1541,6 +1541,14 @@ void detail::ProgramImpl::check_prefetcher_pipe_slot_bind(
             "binds one pipe per slot for its lifetime",
             prefetcher_pipe_id,
             core.str());
+        auto [claimed, first_claim] = preflight.claimed.try_emplace({prefetcher_pipe_id, core}, &prefetcher_pipe);
+        TT_FATAL(
+            first_claim || claimed->second == &prefetcher_pipe,
+            "PrefetcherPipe slot {} on core {} is claimed by two different PrefetcherPipe objects in one "
+            "SetProgramRunArgs; every node hosts one pipe per slot (two pipes carved with the same sender node "
+            "cannot share a sender kernel)",
+            prefetcher_pipe_id,
+            core.str());
     }
 
     // Lane mode needs an exact, P-divisible entry ring. Check against the lanes this slot asks
@@ -1817,7 +1825,12 @@ std::vector<std::string> detail::ProgramImpl::get_registered_prefetcher_pipe_par
 
 void detail::ProgramImpl::bind_prefetcher_pipe_parameters(std::span<const PrefetcherPipeParameterBind> binds) {
     // Pass 1: validate everything. Nothing below this loop may throw on a well-formed batch.
-    std::vector<std::pair<PrefetcherPipeParameterBinding*, experimental::PrefetcherPipeImpl*>> to_commit;
+    struct Checked {
+        const std::string* name;
+        PrefetcherPipeParameterBinding* binding;
+        experimental::PrefetcherPipeImpl* pipe;
+    };
+    std::vector<Checked> to_commit;
     PrefetcherPipeBindPreflight preflight;
     for (const PrefetcherPipeParameterBind& bind : binds) {
         TT_FATAL(bind.pipe != nullptr, "PrefetcherPipeParameter '{}' bind supplies a null pipe", bind.name);
@@ -1841,14 +1854,6 @@ void detail::ProgramImpl::bind_prefetcher_pipe_parameters(std::span<const Prefet
             "pipe was allocated on",
             bind.name);
         TT_FATAL(
-            prefetcher_pipe.sender_core() == binding.sender,
-            "PrefetcherPipeParameter '{}' declares sender node ({},{}) but the supplied pipe's sender is ({},{})",
-            bind.name,
-            binding.sender.x,
-            binding.sender.y,
-            prefetcher_pipe.sender_core().x,
-            prefetcher_pipe.sender_core().y);
-        TT_FATAL(
             prefetcher_pipe.receiver_cores().num_cores() == binding.receivers.num_cores() &&
                 prefetcher_pipe.receiver_cores().intersection(binding.receivers).num_cores() ==
                     binding.receivers.num_cores(),
@@ -1865,18 +1870,45 @@ void detail::ProgramImpl::bind_prefetcher_pipe_parameters(std::span<const Prefet
 
         for (const auto& slot_cores : binding.slots) {
             check_prefetcher_pipe_slot_bind(
-                slot_cores.prefetcher_pipe_id, slot_cores.cores, prefetcher_pipe, preflight);
+                slot_cores.prefetcher_pipe_id,
+                prefetcher_pipe_slot_bind_cores(bind.name, slot_cores, prefetcher_pipe),
+                prefetcher_pipe,
+                preflight);
         }
-        to_commit.emplace_back(&binding, &prefetcher_pipe);
+        to_commit.push_back({.name = &bind.name, .binding = &binding, .pipe = &prefetcher_pipe});
     }
 
     // Pass 2: commit.
-    for (auto& [binding, prefetcher_pipe] : to_commit) {
-        for (const auto& slot_cores : binding->slots) {
-            commit_prefetcher_pipe_slot_bind(slot_cores.prefetcher_pipe_id, slot_cores.cores, *prefetcher_pipe);
+    for (const Checked& checked : to_commit) {
+        for (const auto& slot_cores : checked.binding->slots) {
+            commit_prefetcher_pipe_slot_bind(
+                slot_cores.prefetcher_pipe_id,
+                prefetcher_pipe_slot_bind_cores(*checked.name, slot_cores, *checked.pipe),
+                *checked.pipe);
         }
-        binding->bound_pipe = prefetcher_pipe;
+        checked.binding->bound_pipe = checked.pipe;
     }
+}
+
+CoreRangeSet detail::ProgramImpl::prefetcher_pipe_slot_bind_cores(
+    const std::string& name,
+    const PrefetcherPipeParameterBinding::SlotCores& slot_cores,
+    const experimental::PrefetcherPipeImpl& prefetcher_pipe) {
+    if (!slot_cores.sender_role) {
+        return slot_cores.cores;
+    }
+    // The spec placed the sender kernel; the pipe says which of those nodes is its sender. A
+    // DRAM-resident sender is never one of them, so such a pipe can only be bound as a receiver.
+    const CoreCoord sender = prefetcher_pipe.sender_core();
+    TT_FATAL(
+        slot_cores.cores.contains(sender),
+        "PrefetcherPipeParameter '{}' is bound by a sender kernel on nodes {}, but the supplied pipe's sender is "
+        "({},{}). The sender kernel's WorkUnitSpec must place it on the pipe's sender node.",
+        name,
+        slot_cores.cores.str(),
+        sender.x,
+        sender.y);
+    return CoreRangeSet(CoreRange(sender));
 }
 
 const experimental::CrossNodeDFB& detail::ProgramImpl::get_cross_node_dfb(uint8_t remote_dfb_id) const {

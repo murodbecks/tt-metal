@@ -110,7 +110,9 @@ protected:
 // Spec builders
 // ============================================================================
 
-// Geometry shared by every test: one sender at (0,0), three receivers (0,1)..(0,3).
+// Geometry shared by every test: one sender at (0,0), three receivers (0,1)..(0,3). The spec
+// names only the receivers; the sender node is where the sender kernel's work unit runs, and
+// where the test carves the pipe.
 const NodeCoord pipe_sender_node{0, 0};
 const NodeRange pipe_receiver_nodes{NodeCoord{0, 1}, NodeCoord{0, 3}};
 constexpr uint32_t pipe_entry_size = 2048;
@@ -123,7 +125,6 @@ const DFBSpecName relay_dfb_name{"weights_relay"};
 PrefetcherPipeParameter MakePipeParameter() {
     return PrefetcherPipeParameter{
         .unique_id = pipe_param_name,
-        .sender = pipe_sender_node,
         .receivers = pipe_receiver_nodes,
         .ring_size = pipe_ring_size,
         .entry_size = pipe_entry_size,
@@ -147,7 +148,6 @@ const NodeRange other_receiver_nodes{NodeCoord{1, 1}, NodeCoord{1, 3}};
 PrefetcherPipeParameter MakeOtherPipeParameter() {
     return PrefetcherPipeParameter{
         .unique_id = other_param_name,
-        .sender = other_sender_node,
         .receivers = other_receiver_nodes,
         .ring_size = pipe_ring_size,
         .entry_size = pipe_entry_size,
@@ -314,9 +314,7 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_FullSpecWithSeparateAccessorsPasses) {
     // Different pipes under different accessors on the same kernel are fine when each group
     // tiles the kernel's nodes on its own; here both are single-pipe groups on one sender node.
     ProgramSpec spec = MakeSenderOnlySpec();
-    PrefetcherPipeParameter other = MakeOtherPipeParameter();
-    other.sender = pipe_sender_node;  // same sender node, different receivers
-    spec.prefetcher_pipe_parameters.push_back(other);
+    spec.prefetcher_pipe_parameters.push_back(MakeOtherPipeParameter());  // different receivers, same sender node
     KernelNamed(spec, "sender").prefetcher_pipe_bindings.push_back(BindPipes({other_param_name}, "other"));
     EXPECT_SPEC_VALID(spec);
 }
@@ -397,12 +395,6 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SamePipeBoundTwiceInOneKernelFails) {
 // Geometry rejections (ValidateProgramSpec)
 // ============================================================================
 
-TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SenderAmongReceiversFails) {
-    ProgramSpec spec = MakeSenderOnlySpec();
-    spec.prefetcher_pipe_parameters[0].receivers = NodeRange{NodeCoord{0, 0}, NodeCoord{0, 3}};
-    EXPECT_SPEC_REJECTED(spec, "lists its sender node (0,0) among its receivers");
-}
-
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_EmptyReceiversFails) {
     ProgramSpec spec = MakeSenderOnlySpec();
     spec.prefetcher_pipe_parameters[0].receivers = NodeRangeSet{};
@@ -450,11 +442,13 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_ComputeKernelBindingPipeFails) {
         spec, "Kernel 'compute' binds PrefetcherPipeParameter(s) (accessor 'weights') but is a compute kernel");
 }
 
-TEST_F(PrefetcherPipeSpecTestQuasar, CPU_BindingKernelOutsidePipeNodesFails) {
+TEST_F(PrefetcherPipeSpecTestQuasar, CPU_BindingKernelOnAnyNonReceiverNodeIsSender) {
+    // The spec names no sender, so a one-node kernel anywhere outside the receivers is the sender
+    // role; whether the pipe's sender is really there is settled when the pipe is supplied
+    // (CPU_SetRunArgsSenderNotOnSenderKernelFails).
     ProgramSpec spec = MakeSenderOnlySpec();
-    spec.work_units[0].target_nodes = NodeCoord{2, 2};  // neither sender nor receiver
-    EXPECT_SPEC_REJECTED(
-        spec, "Kernel covers 1 node(s): 0 of the 1 sender node(s), 0 of the 3 receiver node(s), 1 outside the pipes");
+    spec.work_units[0].target_nodes = NodeCoord{2, 2};
+    EXPECT_SPEC_VALID(spec);
 }
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_BindingKernelCoversPartialReceiversFails) {
@@ -463,8 +457,8 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_BindingKernelCoversPartialReceiversFail
     EXPECT_SPEC_REJECTED(
         spec,
         "Kernel 'receiver' accessor 'weights' (1 pipe(s)): the kernel's WorkUnitSpec nodes must equal either the "
-        "group's sender nodes or the union of its receiver nodes. Kernel covers 2 node(s): 0 of the 1 sender "
-        "node(s), 2 of the 3 receiver node(s), 0 outside the pipes");
+        "union of the group's receiver nodes (receiver role) or be 1 node(s) outside them, one per pipe (sender "
+        "role). Kernel covers 2 node(s): 2 of the 3 receiver node(s), 0 outside the receivers");
 }
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_BindingKernelOnSenderAndReceiversFails) {
@@ -472,8 +466,7 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_BindingKernelOnSenderAndReceiversFails)
     ProgramSpec spec = MakeSenderOnlySpec();
     spec.work_units[0].target_nodes =
         NodeRangeSet(std::vector<NodeRange>{NodeRange{pipe_sender_node, pipe_sender_node}, pipe_receiver_nodes});
-    EXPECT_SPEC_REJECTED(
-        spec, "Kernel covers 4 node(s): 1 of the 1 sender node(s), 3 of the 3 receiver node(s), 0 outside the pipes");
+    EXPECT_SPEC_REJECTED(spec, "Kernel covers 4 node(s): 3 of the 3 receiver node(s), 1 outside the receivers");
 }
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_TwoKernelsBindingOnSenderFails) {
@@ -512,17 +505,16 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupMixedRolesFails) {
         {"mixed"})};
     EXPECT_SPEC_REJECTED(
         spec,
-        "Kernel 'mixed' accessor 'io' (2 pipe(s)): the kernel's WorkUnitSpec nodes must equal either the group's "
-        "sender nodes or the union of its receiver nodes. Kernel covers 4 node(s): 1 of the 2 sender node(s), 3 of "
-        "the 6 receiver node(s), 0 outside the pipes");
+        "Kernel 'mixed' accessor 'io' (2 pipe(s)): the kernel's WorkUnitSpec nodes must equal either the union of "
+        "the group's receiver nodes (receiver role) or be 2 node(s) outside them, one per pipe (sender role). Kernel "
+        "covers 4 node(s): 3 of the 6 receiver node(s), 1 outside the receivers");
 }
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupPartialTilingFails) {
     // Receiver kernel binds both pipes but only runs on weights' receivers.
     ProgramSpec spec = MakeTwoPipeReceiverSpec();
     spec.work_units[0].target_nodes = pipe_receiver_nodes;
-    EXPECT_SPEC_REJECTED(
-        spec, "Kernel covers 3 node(s): 0 of the 2 sender node(s), 3 of the 6 receiver node(s), 0 outside the pipes");
+    EXPECT_SPEC_REJECTED(spec, "Kernel covers 3 node(s): 3 of the 6 receiver node(s), 0 outside the receivers");
 }
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupSpillsOutsideFails) {
@@ -530,8 +522,7 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupSpillsOutsideFails) {
     ProgramSpec spec = MakeTwoPipeReceiverSpec();
     spec.work_units[0].target_nodes = NodeRangeSet(
         std::vector<NodeRange>{pipe_receiver_nodes, other_receiver_nodes, NodeRange{NodeCoord{3, 3}, NodeCoord{3, 3}}});
-    EXPECT_SPEC_REJECTED(
-        spec, "Kernel covers 7 node(s): 0 of the 2 sender node(s), 6 of the 6 receiver node(s), 1 outside the pipes");
+    EXPECT_SPEC_REJECTED(spec, "Kernel covers 7 node(s): 6 of the 6 receiver node(s), 1 outside the receivers");
 }
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupOverlappingReceiversFails) {
@@ -539,24 +530,37 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupOverlappingReceiversFails)
     spec.prefetcher_pipe_parameters[1].receivers = pipe_receiver_nodes;  // same receivers as "weights"
     EXPECT_SPEC_REJECTED(
         spec,
-        "Kernel 'receiver' accessor 'in' names PrefetcherPipeParameter 'other' whose nodes overlap another pipe's "
-        "in the same accessor");
+        "Kernel 'receiver' accessor 'in' names PrefetcherPipeParameter 'other' whose receiver nodes overlap another "
+        "pipe's in the same accessor");
 }
 
-TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupSenderInsideOtherReceiversFails) {
-    // other's sender sits on one of weights' receiver nodes: that node would host two pipes.
+TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupSenderKernelOnReceiverFails) {
+    // The two-pipe sender kernel runs on (0,0) and (0,2); (0,2) is one of weights' receivers, so
+    // that node would host two pipes. Neither role fits.
     ProgramSpec spec;
     spec.name = "sender_in_receivers";
     auto sender = MakeMinimalGen2DMKernel("sender");
     sender.prefetcher_pipe_bindings.push_back(BindPipes({pipe_param_name, other_param_name}, "out"));
     spec.kernels = {sender};
     spec.prefetcher_pipe_parameters = {MakePipeParameter(), MakeOtherPipeParameter()};
-    spec.prefetcher_pipe_parameters[1].sender = NodeCoord{0, 2};
     spec.work_units = {MakeMinimalWorkUnit(
         "sender_wu",
         NodeRangeSet(std::vector<NodeRange>{NodeRange{pipe_sender_node, pipe_sender_node}, NodeRange{{0, 2}, {0, 2}}}),
         {"sender"})};
-    EXPECT_SPEC_REJECTED(spec, "pipes sharing an accessor must occupy disjoint nodes");
+    EXPECT_SPEC_REJECTED(spec, "Kernel covers 2 node(s): 1 of the 6 receiver node(s), 1 outside the receivers");
+}
+
+TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupSenderNodeCountMismatchFails) {
+    // Two pipes under one sender accessor need exactly two sender nodes.
+    ProgramSpec spec;
+    spec.name = "three_sender_nodes";
+    auto sender = MakeMinimalGen2DMKernel("sender");
+    sender.prefetcher_pipe_bindings.push_back(BindPipes({pipe_param_name, other_param_name}, "out"));
+    spec.kernels = {sender};
+    spec.prefetcher_pipe_parameters = {MakePipeParameter(), MakeOtherPipeParameter()};
+    spec.work_units = {
+        MakeMinimalWorkUnit("sender_wu", NodeRangeSet(NodeRange{NodeCoord{0, 0}, NodeCoord{2, 0}}), {"sender"})};
+    EXPECT_SPEC_REJECTED(spec, "Kernel covers 3 node(s): 0 of the 6 receiver node(s), 3 outside the receivers");
 }
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_AccessorGroupGeometryMismatchFails) {
@@ -682,9 +686,7 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_RelayProducerBindsDifferentGroupFails) 
     spec.kernels.erase(spec.kernels.begin());  // drop "sender"
     spec.work_units.erase(spec.work_units.begin());
     spec.prefetcher_pipe_parameters[0].receivers = NodeCoord{0, 1};
-    PrefetcherPipeParameter other = MakeOtherPipeParameter();
-    other.sender = NodeCoord{0, 1};
-    spec.prefetcher_pipe_parameters.push_back(other);
+    spec.prefetcher_pipe_parameters.push_back(MakeOtherPipeParameter());  // its sender is the (0,1) kernel
     KernelNamed(spec, "receiver").prefetcher_pipe_bindings = {BindPipes({other_param_name}, "out")};
     spec.work_units[0].target_nodes = NodeCoord{0, 1};
     EXPECT_SPEC_REJECTED(
@@ -718,16 +720,17 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MultiPipeRelayProducerBindsSubsetFails)
     // also fails tiling (it runs on both receiver sets). The tiling rule fires first.
     ProgramSpec spec = MakeTwoPipeReceiverSpec();
     KernelNamed(spec, "receiver").prefetcher_pipe_bindings[0].pipe_parameter_names = {pipe_param_name};
-    EXPECT_SPEC_REJECTED(
-        spec, "Kernel covers 6 node(s): 0 of the 1 sender node(s), 3 of the 3 receiver node(s), 3 outside the pipes");
+    EXPECT_SPEC_REJECTED(spec, "Kernel covers 6 node(s): 3 of the 3 receiver node(s), 3 outside the receivers");
 }
 
 // ============================================================================
 // Slot reservation (MakeProgramFromSpec) and pipe binding (SetProgramRunArgs)
 // ============================================================================
 
-// One pipe carved from a space sized exactly for it. The pipe keeps the space alive.
-PrefetcherPipe MakePipeFor(distributed::MeshDevice& device, const PrefetcherPipeParameter& param) {
+// One pipe carved from a space sized exactly for it, with `sender` as its sender node (the spec
+// does not carry one). The pipe keeps the space alive.
+PrefetcherPipe MakePipeFor(
+    distributed::MeshDevice& device, const PrefetcherPipeParameter& param, const CoreCoord& sender) {
     const CoreRangeSet receivers = std::visit(
         [](const auto& nodes) -> CoreRangeSet {
             if constexpr (std::is_same_v<std::decay_t<decltype(nodes)>, CoreRangeSet>) {
@@ -740,12 +743,20 @@ PrefetcherPipe MakePipeFor(distributed::MeshDevice& device, const PrefetcherPipe
     PrefetcherPipeSpace space = CreatePrefetcherPipeSpace(
         &device,
         PrefetcherPipeSpaceConfig{
-            .sender_cores = CoreRangeSet(CoreRange(param.sender)),
+            .sender_cores = CoreRangeSet(CoreRange(sender)),
             .receiver_domain = receivers,
             .ring_size = param.ring_size,
             .max_receivers_per_pipe = receivers.num_cores(),
         });
-    return space.create_pipe(param.sender, receivers);
+    return space.create_pipe(sender, receivers);
+}
+
+// The test geometry's pipes carved where their sender kernels run.
+PrefetcherPipe MakeWeightsPipe(distributed::MeshDevice& device) {
+    return MakePipeFor(device, MakePipeParameter(), pipe_sender_node);
+}
+PrefetcherPipe MakeOtherPipe(distributed::MeshDevice& device) {
+    return MakePipeFor(device, MakeOtherPipeParameter(), other_sender_node);
 }
 
 // The participant record for `prefetcher_pipe_id` on `core`, or nullptr when the core has no slot.
@@ -782,7 +793,6 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MakeProgramReservesOneSlotPerAccessorGr
     const auto* binding = impl.get_prefetcher_pipe_parameter(pipe_param_name.get());
     ASSERT_NE(binding, nullptr);
     EXPECT_EQ(binding->bound_pipe, nullptr);
-    EXPECT_EQ(binding->sender, pipe_sender_node);
     EXPECT_EQ(binding->receivers.num_cores(), 3u);
     EXPECT_EQ(binding->ring_size, pipe_ring_size);
     ASSERT_EQ(binding->slots.size(), 2u);
@@ -795,6 +805,8 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MakeProgramReservesOneSlotPerAccessorGr
         EXPECT_EQ(slot.entry_size, pipe_entry_size);
         if (slot.receiver_cores.num_cores() == 0) {
             ++sender_slots;
+            EXPECT_TRUE(slot_cores.sender_role);
+            EXPECT_TRUE(slot_cores.cores.contains(pipe_sender_node));
             EXPECT_EQ(slot.cores.num_cores(), 1u);
             EXPECT_EQ(slot.num_credit_lanes, 1u);
             EXPECT_FALSE(slot.relay_dfb_host_id.has_value());
@@ -846,7 +858,7 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_KernelsGetOnePipeAccessorTokenPerBindin
 // afterwards on those cores is rejected. Tests below follow that order.
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsBindsPipeToEverySlotAndRelay) {
-    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, MakePipeParameter());
+    PrefetcherPipe pipe = MakeWeightsPipe(*mesh_device_);
     Program program = MakeProgramFromSpec(*mesh_device_, MakeFullPipeSpec(/*receiver_threads=*/2));
     EXPECT_EQ(pipe.impl().num_credit_lanes(), 1u);
 
@@ -873,7 +885,7 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsBindsPipeToEverySlotAndRelay)
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsSenderOnlyLeavesLanesAlone) {
     Program program = MakeProgramFromSpec(*mesh_device_, MakeSenderOnlySpec());
-    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, MakePipeParameter());
+    PrefetcherPipe pipe = MakeWeightsPipe(*mesh_device_);
     SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &pipe}}));
     EXPECT_EQ(pipe.impl().num_credit_lanes(), 1u);
     const auto* binding = program.impl().get_prefetcher_pipe_parameter(pipe_param_name.get());
@@ -892,27 +904,39 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsMissingPipeFails) {
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsUnknownParameterFails) {
     Program program = MakeProgramFromSpec(*mesh_device_, MakeSenderOnlySpec());
-    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, MakePipeParameter());
+    PrefetcherPipe pipe = MakeWeightsPipe(*mesh_device_);
     EXPECT_THROWS_WITH(
         SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &pipe}, {PrefetcherPipeParamName{"nope"}, &pipe}})),
         "PrefetcherPipe argument for 'nope', but the Program declares no PrefetcherPipeParameter of that name");
 }
 
-TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsWrongSenderFails) {
+TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsSenderNotOnSenderKernelFails) {
+    // The spec does not name a sender; a Program that runs the sender kernel learns the sender
+    // from the pipe and requires the kernel to be placed there.
     Program program = MakeProgramFromSpec(*mesh_device_, MakeSenderOnlySpec());
-    PrefetcherPipeParameter param = MakePipeParameter();
-    param.sender = CoreCoord{2, 0};
-    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, param);
+    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, MakePipeParameter(), CoreCoord{2, 0});
     EXPECT_THROWS_WITH(
         SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &pipe}})),
-        "supplies a pipe whose sender node (2,0) differs from the declared sender (0,0)");
+        "is bound by a sender kernel on nodes {[0-0 - 0-0]}, but the supplied pipe's sender is (2,0)");
+    EXPECT_EQ(program.impl().get_prefetcher_pipe_parameter(pipe_param_name.get())->bound_pipe, nullptr);
+}
+
+TEST_F(PrefetcherPipeSpecTestQuasar, CPU_ReceiverOnlyProgramAcceptsAnySender) {
+    // A consumer Program never states the sender: pipes from different senders bind alike.
+    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, MakePipeParameter(), CoreCoord{2, 0});
+    ProgramSpec spec = MakeFullPipeSpec();
+    spec.kernels.erase(spec.kernels.begin());  // drop "sender"
+    spec.work_units.erase(spec.work_units.begin());
+    Program program = MakeProgramFromSpec(*mesh_device_, spec);
+    EXPECT_NO_THROW(SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &pipe}})));
+    EXPECT_EQ(program.impl().get_prefetcher_pipe_parameter(pipe_param_name.get())->bound_pipe, &pipe.impl());
 }
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsWrongReceiversFails) {
     Program program = MakeProgramFromSpec(*mesh_device_, MakeSenderOnlySpec());
     PrefetcherPipeParameter param = MakePipeParameter();
     param.receivers = NodeRangeSet(NodeRange{NodeCoord{0, 1}, NodeCoord{0, 2}});  // 2 of the 3
-    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, param);
+    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, param, pipe_sender_node);
     EXPECT_THROWS_WITH(
         SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &pipe}})), "supplies a pipe whose receiver nodes");
 }
@@ -921,7 +945,7 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsWrongRingSizeFails) {
     Program program = MakeProgramFromSpec(*mesh_device_, MakeSenderOnlySpec());
     PrefetcherPipeParameter param = MakePipeParameter();
     param.ring_size = pipe_ring_size * 2;
-    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, param);
+    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, param, pipe_sender_node);
     EXPECT_THROWS_WITH(
         SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &pipe}})),
         "supplies a pipe with ring_size 16384 but the parameter declares ring_size 8192");
@@ -930,8 +954,8 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_SetRunArgsWrongRingSizeFails) {
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_RebindingDifferentPipeFails) {
     // Sticky identity: a Program binds a parameter to one pipe object for its lifetime.
     Program program = MakeProgramFromSpec(*mesh_device_, MakeSenderOnlySpec());
-    PrefetcherPipe first = MakePipeFor(*mesh_device_, MakePipeParameter());
-    PrefetcherPipe second = MakePipeFor(*mesh_device_, MakePipeParameter());
+    PrefetcherPipe first = MakeWeightsPipe(*mesh_device_);
+    PrefetcherPipe second = MakeWeightsPipe(*mesh_device_);
     SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &first}}));
     EXPECT_THROWS_WITH(
         UpdateProgramRunArgs(program, PipeArgs({{pipe_param_name, &second}})),
@@ -943,7 +967,7 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_RebindingDifferentPipeFails) {
 }
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_RebindingSamePipeIsNoOpAndUpdateMayOmitIt) {
-    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, MakePipeParameter());
+    PrefetcherPipe pipe = MakeWeightsPipe(*mesh_device_);
     Program program = MakeProgramFromSpec(*mesh_device_, MakeFullPipeSpec());
     SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &pipe}}));
     EXPECT_NO_THROW(SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &pipe}})));
@@ -954,7 +978,7 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_RebindingSamePipeIsNoOpAndUpdateMayOmit
 
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_ResizingRelayDFBFails) {
     // The relay's geometry is the pipe's; per-run DFB size overrides do not apply to it.
-    PrefetcherPipe pipe = MakePipeFor(*mesh_device_, MakePipeParameter());
+    PrefetcherPipe pipe = MakeWeightsPipe(*mesh_device_);
     Program program = MakeProgramFromSpec(*mesh_device_, MakeFullPipeSpec());
     ProgramRunArgs params = PipeArgs({{pipe_param_name, &pipe}});
     params.dfb_run_overrides.push_back({.dfb = relay_dfb_name, .num_entries = 2});
@@ -980,8 +1004,8 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MultiPipeAccessorResolvesOnePipePerNode
     Program program = MakeProgramFromSpec(*mesh_device_, spec);
     ASSERT_EQ(program.impl().num_prefetcher_pipe_slots(), 1u);
 
-    PrefetcherPipe weights = MakePipeFor(*mesh_device_, MakePipeParameter());
-    PrefetcherPipe other = MakePipeFor(*mesh_device_, MakeOtherPipeParameter());
+    PrefetcherPipe weights = MakeWeightsPipe(*mesh_device_);
+    PrefetcherPipe other = MakeOtherPipe(*mesh_device_);
     SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &weights}, {other_param_name, &other}}));
 
     const auto* on_weights_sender = ParticipantOn(program, pipe_sender_node, 0);
@@ -994,8 +1018,29 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MultiPipeAccessorResolvesOnePipePerNode
     EXPECT_EQ(on_other_sender->config_page_addr, other.config_address());
 }
 
+TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MultiPipeAccessorTwoPipesOneSenderNodeFails) {
+    // Both pipes were carved with (0,0) as sender: the sender kernel's second node (1,0) would be
+    // left without a pipe and (0,0) would host two. Rejected as a whole; nothing is bound.
+    ProgramSpec spec;
+    spec.name = "two_senders";
+    auto sender = MakeMinimalGen2DMKernel("sender");
+    sender.prefetcher_pipe_bindings.push_back(BindPipes({pipe_param_name, other_param_name}, "out"));
+    spec.kernels = {sender};
+    spec.prefetcher_pipe_parameters = {MakePipeParameter(), MakeOtherPipeParameter()};
+    spec.work_units = {MakeMinimalWorkUnit("sender_wu", both_sender_nodes, {"sender"})};
+    Program program = MakeProgramFromSpec(*mesh_device_, spec);
+
+    PrefetcherPipe weights = MakeWeightsPipe(*mesh_device_);
+    PrefetcherPipe other = MakePipeFor(*mesh_device_, MakeOtherPipeParameter(), pipe_sender_node);
+    EXPECT_THROWS_WITH(
+        SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &weights}, {other_param_name, &other}})),
+        "is claimed by two different PrefetcherPipe objects in one SetProgramRunArgs");
+    EXPECT_EQ(program.impl().get_prefetcher_pipe_parameter(pipe_param_name.get())->bound_pipe, nullptr);
+    EXPECT_EQ(ParticipantOn(program, pipe_sender_node, 0)->pipe, nullptr);
+}
+
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MultiPipeAccessorMissingOnePipeFails) {
-    PrefetcherPipe weights = MakePipeFor(*mesh_device_, MakePipeParameter());
+    PrefetcherPipe weights = MakeWeightsPipe(*mesh_device_);
     Program program = MakeProgramFromSpec(*mesh_device_, MakeTwoPipeReceiverSpec());
     EXPECT_THROWS_WITH(
         SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &weights}})),
@@ -1006,8 +1051,8 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MultiPipeRelayWithSharedRingBinds) {
     // The persistent arena is per core, so two pipes on disjoint cores created back to back land at
     // one ring address: the relay DFB over both can alias it. (Phase 3's PrefetcherPipeSpace makes
     // this guarantee explicit.)
-    PrefetcherPipe weights = MakePipeFor(*mesh_device_, MakePipeParameter());
-    PrefetcherPipe other = MakePipeFor(*mesh_device_, MakeOtherPipeParameter());
+    PrefetcherPipe weights = MakeWeightsPipe(*mesh_device_);
+    PrefetcherPipe other = MakeOtherPipe(*mesh_device_);
     ASSERT_EQ(weights.buffer_address(), other.buffer_address());
     Program program = MakeProgramFromSpec(*mesh_device_, MakeTwoPipeReceiverSpec(/*receiver_threads=*/2));
     SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &weights}, {other_param_name, &other}}));
@@ -1028,9 +1073,9 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MultiPipeRelayWithSharedRingBinds) {
 TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MultiPipeRelayWithDifferentRingsFails) {
     // Pipes at different ring addresses cannot share one relay DFB. `filler` occupies the first
     // arena slot on other's cores so `other` lands above `weights`.
-    PrefetcherPipe weights = MakePipeFor(*mesh_device_, MakePipeParameter());
-    PrefetcherPipe filler = MakePipeFor(*mesh_device_, MakeOtherPipeParameter());
-    PrefetcherPipe other = MakePipeFor(*mesh_device_, MakeOtherPipeParameter());
+    PrefetcherPipe weights = MakeWeightsPipe(*mesh_device_);
+    PrefetcherPipe filler = MakeOtherPipe(*mesh_device_);
+    PrefetcherPipe other = MakeOtherPipe(*mesh_device_);
     ASSERT_NE(weights.buffer_address(), other.buffer_address());
     ASSERT_EQ(weights.buffer_address(), filler.buffer_address());
     Program program = MakeProgramFromSpec(*mesh_device_, MakeTwoPipeReceiverSpec(/*receiver_threads=*/2));
@@ -1070,8 +1115,8 @@ TEST_F(PrefetcherPipeSpecTestQuasar, CPU_MultiPipeReceiverWithoutRelayBindsBothP
     spec.work_units[0].kernels = {KernelSpecName{"receiver"}};
     Program program = MakeProgramFromSpec(*mesh_device_, spec);
 
-    PrefetcherPipe weights = MakePipeFor(*mesh_device_, MakePipeParameter());
-    PrefetcherPipe other = MakePipeFor(*mesh_device_, MakeOtherPipeParameter());
+    PrefetcherPipe weights = MakeWeightsPipe(*mesh_device_);
+    PrefetcherPipe other = MakeOtherPipe(*mesh_device_);
     SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &weights}, {other_param_name, &other}}));
 
     EXPECT_EQ(weights.impl().num_credit_lanes(), 2u);
@@ -1176,8 +1221,8 @@ TEST_F(PrefetcherPipeSpecTestGen1TwoChips, CPU_PipeFromAnotherMeshFails) {
     spec.prefetcher_pipe_parameters = {MakePipeParameter()};
     spec.work_units = {MakeMinimalWorkUnit("sender_wu", pipe_sender_node, {"sender"})};
 
-    PrefetcherPipe on_a = MakePipeFor(*mesh_a_, MakePipeParameter());
-    PrefetcherPipe on_b = MakePipeFor(*mesh_b_, MakePipeParameter());
+    PrefetcherPipe on_a = MakeWeightsPipe(*mesh_a_);
+    PrefetcherPipe on_b = MakeWeightsPipe(*mesh_b_);
     Program program = MakeProgramFromSpec(*mesh_a_, spec);
     EXPECT_THROWS_WITH(
         SetProgramRunArgs(program, PipeArgs({{pipe_param_name, &on_b}})),

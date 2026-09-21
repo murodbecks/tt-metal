@@ -95,7 +95,7 @@ struct ProgramSpec {
     Group<TensorParameter> tensor_parameters;
 
     // PrefetcherPipe parameter declarations
-    // Names the geometry (sender, receivers, ring size, entry size) of each durable PrefetcherPipe
+    // Names the geometry (receivers, ring size, entry size) of each durable PrefetcherPipe
     // the Program's kernels take part in. (The actual PrefetcherPipe objects are supplied via
     // ProgramRunArgs.) A kernel's sender/receiver role is derived from its WorkUnitSpec node coverage.
     Group<PrefetcherPipeParameter> prefetcher_pipe_parameters;

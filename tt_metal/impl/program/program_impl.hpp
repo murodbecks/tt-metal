@@ -440,6 +440,9 @@ public:
     struct PrefetcherPipeBindPreflight {
         std::unordered_map<const experimental::PrefetcherPipeImpl*, uint32_t> armed_lanes;
         std::unordered_map<uint8_t, DeviceAddr> relay_rings;
+        // (slot, core) -> pipe checked earlier in this batch; a second pipe on the same core is a
+        // collision (e.g. two pipes carved with the same sender node under one sender accessor).
+        std::map<std::pair<uint8_t, CoreCoord>, const experimental::PrefetcherPipeImpl*> claimed;
     };
     void check_prefetcher_pipe_slot_bind(
         uint8_t prefetcher_pipe_id,
@@ -467,17 +470,19 @@ public:
 
     // Metal 2.0: a PrefetcherPipeParameter's placement in this program. One parameter may feed
     // several slots (one per accessor group that names it), on the cores where that group's
-    // kernel runs and the parameter's pipe is present.
+    // kernel runs and the parameter's pipe is present. The spec names no sender: on a sender-role
+    // slot `cores` is every node the sender kernel runs on (one per pipe in the accessor group),
+    // and the bind claims the one that is the supplied pipe's sender.
     struct PrefetcherPipeParameterBinding {
         // Mesh the program was built for; a bound pipe must live on it (its config pages and ring
         // are L1 on that mesh).
         distributed::MeshDevice* device = nullptr;
-        CoreCoord sender;
         CoreRangeSet receivers;
         uint32_t ring_size = 0;
         struct SlotCores {
             uint8_t prefetcher_pipe_id;
             CoreRangeSet cores;
+            bool sender_role = false;
         };
         std::vector<SlotCores> slots;
         // Pipe object bound by SetProgramRunArgs; sticky for the program's lifetime.
@@ -495,6 +500,13 @@ public:
         experimental::PrefetcherPipeImpl* pipe;
     };
     void bind_prefetcher_pipe_parameters(std::span<const PrefetcherPipeParameterBind> binds);
+    // The cores a parameter's slot placement binds for `prefetcher_pipe`: the placement's cores
+    // on a receiver-role slot; on a sender-role slot, the pipe's sender node, which must be one
+    // of them (throws otherwise, naming parameter `name`).
+    static CoreRangeSet prefetcher_pipe_slot_bind_cores(
+        const std::string& name,
+        const PrefetcherPipeParameterBinding::SlotCores& slot_cores,
+        const experimental::PrefetcherPipeImpl& prefetcher_pipe);
 
     // Allocates TCs and remapper configs, cannot be done on creation because we need to determine if a set of DFBs on a
     // core require remapper being enabled
