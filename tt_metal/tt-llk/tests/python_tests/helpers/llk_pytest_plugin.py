@@ -214,6 +214,14 @@ def pytest_addoption(parser):
     )
 
     parser.addoption(
+        "--ulp-measure",
+        default=None,
+        metavar="PATH",
+        help="Append one JSON row per comparison (test, output format, measured max "
+        "ULP) to PATH, for folding a full sweep back into the budget table. "
+        "Reporting only: it cannot change a verdict.",
+    )
+    parser.addoption(
         "--ulp-report",
         action="store_true",
         help="Log the measured ULP distance for every comparison on a ULP-capable "
@@ -468,6 +476,8 @@ def pytest_configure(config):
 
     if config.getoption("--ulp-report"):
         utils_module._ULP_REPORT = True
+    if config.getoption("--ulp-measure"):
+        utils_module._ULP_MEASURE_PATH = config.getoption("--ulp-measure")
 
     log_file = "pytest_errors.log"
     if not hasattr(config, "workerinput"):  # executed only by master pytest runner
