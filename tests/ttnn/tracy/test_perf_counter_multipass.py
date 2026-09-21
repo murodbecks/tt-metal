@@ -80,6 +80,25 @@ def test_merge_keeps_pass0_whole_and_appends_only_counter_rows(tmp_path):
     assert sum(line.startswith("PCIe") for line in lines) == 1
 
 
+def test_merge_anchors_each_trace_replay_on_its_own_pass0_burst(tmp_path):
+    pass0 = tmp_path / "pass_0.csv"
+    pass1 = tmp_path / "pass_1.csv"
+    merged = tmp_path / "merged.csv"
+    # two replays of one traced op: same run host id, a zone row of the same core between the two readouts
+    pass0.write_text(CSV_HEADER + "0,1,1,BRISC,9090,110,42,7\n0,1,1,BRISC,4096,200,0,7\n0,1,1,BRISC,9090,210,42,7\n")
+    pass1.write_text(
+        CSV_HEADER
+        + "0,1,1,BRISC,9090,115,43,7\n0,1,1,TRISC_0,9090,116,44,7\n0,1,1,BRISC,4096,205,0,7\n"
+        + "0,1,1,BRISC,9090,215,43,7\n0,1,1,BRISC,4096,300,0,7\n0,1,1,BRISC,9090,315,43,7\n"
+    )
+
+    merge_perf_counter_device_logs([pass0, pass1], merged)
+
+    lines = merged.read_text().splitlines()
+    # the first burst lands on 110 (both RISCs of the core), the second on 210, the third has no replay in pass 0
+    assert lines[4:] == ["0,1,1,BRISC,9090,110,43,7", "0,1,1,TRISC_0,9090,110,44,7", "0,1,1,BRISC,9090,210,43,7"]
+
+
 def test_merge_drops_counter_rows_with_no_pass0_anchor(tmp_path):
     pass0 = tmp_path / "pass_0.csv"
     pass1 = tmp_path / "pass_1.csv"

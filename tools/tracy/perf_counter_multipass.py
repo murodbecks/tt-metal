@@ -175,7 +175,33 @@ def _counter_row_fields(line):
 
 
 def _op_key(fields):
-    return (fields[1].strip(), fields[2].strip(), fields[PERF_COUNTER_RUN_HOST_ID_COL].strip())
+    # device, core and run host id; every RISC of the core reads out the same op, so the RISC is not part of it
+    return (fields[0].strip(), fields[1].strip(), fields[2].strip(), fields[PERF_COUNTER_RUN_HOST_ID_COL].strip())
+
+
+def _counter_bursts(lines):
+    """Yield (op key, burst index, fields) for every perf-counter row, in file order.
+
+    A traced op replayed n times shares one run host id across its replays, so the key alone cannot tell them
+    apart. Each replay leaves its own burst of counter rows in the device log, separated by the zone rows the same
+    core writes in between, and the bursts are numbered per key so the n-th replay of a later pass lands on the
+    n-th replay of pass 0."""
+    last_key_of_core = {}
+    bursts_of_key = {}
+    for line in lines:
+        fields = line.split(",")
+        if len(fields) <= PERF_COUNTER_RUN_HOST_ID_COL:
+            continue
+        core = tuple(f.strip() for f in fields[:3])
+        counter_fields = _counter_row_fields(line)
+        if counter_fields is None:
+            last_key_of_core[core] = None
+            continue
+        key = _op_key(counter_fields)
+        if last_key_of_core.get(core) != key:
+            bursts_of_key[key] = bursts_of_key.get(key, 0) + 1
+            last_key_of_core[core] = key
+        yield key, bursts_of_key[key] - 1, counter_fields
 
 
 def merge_perf_counter_device_logs(pass_csvs, out_csv):
@@ -184,18 +210,13 @@ def merge_perf_counter_device_logs(pass_csvs, out_csv):
     sort into pass 0's zones arbitrarily and the ops report then sees a duplicate device op."""
     base = Path(pass_csvs[0]).read_text().splitlines(keepends=True)
     anchors = {}
-    for line in base:
-        fields = _counter_row_fields(line)
-        if fields:
-            anchors.setdefault(_op_key(fields), fields[PERF_COUNTER_TIMESTAMP_COL].strip())
+    for key, burst, fields in _counter_bursts(base):
+        anchors.setdefault((key, burst), fields[PERF_COUNTER_TIMESTAMP_COL].strip())
 
     merged, unanchored = list(base), 0
     for extra in pass_csvs[1:]:
-        for line in Path(extra).read_text().splitlines(keepends=True):
-            fields = _counter_row_fields(line)
-            if not fields:
-                continue
-            anchor = anchors.get(_op_key(fields))
+        for key, burst, fields in _counter_bursts(Path(extra).read_text().splitlines(keepends=True)):
+            anchor = anchors.get((key, burst))
             if anchor is None:
                 unanchored += 1
                 continue
