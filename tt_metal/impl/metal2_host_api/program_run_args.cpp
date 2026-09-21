@@ -232,7 +232,7 @@ void RejectPrefetcherPipeRelayResize(
 // bind time in ProgramImpl::bind_prefetcher_pipe_parameters.
 void ValidatePrefetcherPipeArgs(
     const Program& program,
-    const Table<PrefetcherPipeParamName, ProgramRunArgs::PrefetcherPipeArgument>& pipe_args,
+    const Table<PrefetcherPipeParamName, AdvancedProgramRunArgs::PrefetcherPipeArgument>& pipe_args,
     bool require_all) {
     const detail::ProgramImpl& program_impl = program.impl();
 
@@ -294,7 +294,7 @@ void ValidatePrefetcherPipeArgs(
 // different object).
 void BindPrefetcherPipeArgs(
     detail::ProgramImpl& program_impl,
-    const Table<PrefetcherPipeParamName, ProgramRunArgs::PrefetcherPipeArgument>& pipe_args) {
+    const Table<PrefetcherPipeParamName, AdvancedProgramRunArgs::PrefetcherPipeArgument>& pipe_args) {
     std::vector<detail::ProgramImpl::PrefetcherPipeParameterBind> binds;
     binds.reserve(pipe_args.size());
     for (const auto& [param_name, pipe_arg] : pipe_args) {
@@ -509,7 +509,7 @@ void ValidateProgramRunArgs(const Program& program, const ProgramRunArgs& params
     ValidateTensorArgs(program, params.tensor_args);
 
     // Validate PrefetcherPipe arguments (delegated to shared helper; full path requires all).
-    ValidatePrefetcherPipeArgs(program, params.prefetcher_pipe_args, /*require_all=*/true);
+    ValidatePrefetcherPipeArgs(program, params.advanced_options.prefetcher_pipe_args, /*require_all=*/true);
 }
 
 // Emit the CRTA words for a single tensor binding, in order:
@@ -963,7 +963,7 @@ void SetProgramRunArgs(Program& program, const ProgramRunArgs& params, bool skip
 
     // Bind PrefetcherPipe objects to their parameters' slots (per node; a relay DFB over them is
     // pointed at the pipe ring here). Sticky across calls.
-    BindPrefetcherPipeArgs(program_impl, params.prefetcher_pipe_args);
+    BindPrefetcherPipeArgs(program_impl, params.advanced_options.prefetcher_pipe_args);
     program_impl.mark_program_run_args_initialized();
 }
 
@@ -1266,7 +1266,7 @@ void ValidateUpdateProgramRunArgs(const Program& program, const ProgramRunArgs& 
 
     // PrefetcherPipe args: any may be omitted (the binding is sticky); a supplied one must name a
     // declared parameter and match its geometry.
-    ValidatePrefetcherPipeArgs(program, params.prefetcher_pipe_args, /*require_all=*/false);
+    ValidatePrefetcherPipeArgs(program, params.advanced_options.prefetcher_pipe_args, /*require_all=*/false);
 }
 
 void UpdateProgramRunArgs(Program& program, const ProgramRunArgs& params, bool skip_validation) {
@@ -1441,7 +1441,7 @@ void UpdateProgramRunArgs(Program& program, const ProgramRunArgs& params, bool s
 
     // ---- PrefetcherPipe args: omitted parameters keep their bound pipe; a supplied one is bound
     //      (no-op when it is the already-bound object) ----
-    BindPrefetcherPipeArgs(program_impl, params.prefetcher_pipe_args);
+    BindPrefetcherPipeArgs(program_impl, params.advanced_options.prefetcher_pipe_args);
 }
 
 ProgramRunArgs MergeProgramRunArgs(ProgramRunArgs base, std::span<const ProgramRunArgs> rest, bool skip_validation) {
@@ -1463,14 +1463,14 @@ ProgramRunArgs MergeProgramRunArgs(ProgramRunArgs base, std::span<const ProgramR
 
         // PrefetcherPipe args: union by parameter name (disjoint). Same insert-not-[] reasoning as
         // tensor_args: reference_wrapper is not default-constructible.
-        for (const auto& [name, arg] : other.prefetcher_pipe_args) {
+        for (const auto& [name, arg] : other.advanced_options.prefetcher_pipe_args) {
             if (!skip_validation) {
                 TT_FATAL(
-                    !base.prefetcher_pipe_args.contains(name),
+                    !base.advanced_options.prefetcher_pipe_args.contains(name),
                     "MergeProgramRunArgs: PrefetcherPipeParameter '{}' is specified in more than one ProgramRunArgs.",
                     name);
             }
-            base.prefetcher_pipe_args.insert({name, arg});
+            base.advanced_options.prefetcher_pipe_args.insert({name, arg});
         }
 
         // DFB run overrides: union by DFB name (disjoint).

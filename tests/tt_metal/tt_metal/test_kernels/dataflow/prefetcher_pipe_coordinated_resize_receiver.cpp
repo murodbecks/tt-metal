@@ -7,7 +7,7 @@
 // credits. The sender may already be configured for E2 while E1 is consumed.
 //
 // Bindings:
-//   pipe::in               — KernelSpec::PrefetcherPipeBinding accessor (program slot id baked in)
+//   pipe::in               — KernelAdvancedOptions::PrefetcherPipeBinding accessor (program slot id baked in)
 // Args (named CTAs):
 //   args::num_entries_e1
 //   args::entry_size_e2

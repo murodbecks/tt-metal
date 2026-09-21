@@ -28,7 +28,7 @@ void py_module_types(nb::module_& mod) {
     nb::class_<PrefetcherPipe>(mod, "PrefetcherPipe", R"doc(
         One sender -> receivers PrefetcherPipe carved from a PrefetcherPipeSpace.
 
-        A Program uses it through the Metal 2.0 host API (ProgramRunArgs.prefetcher_pipe_args)
+        A Program uses it through the Metal 2.0 host API (ProgramRunArgs.advanced_options.prefetcher_pipe_args)
         or through a ttnn operation that takes a pipe argument. Keep the pipe alive for as long
         as any program uses it; letting it go returns its cores to the space.
     )doc")

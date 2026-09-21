@@ -23,8 +23,14 @@ namespace tt::tt_metal::experimental {
 //
 // Like a TensorParameter, the pipe is a user-managed resource whose lifetime is
 // not bound to the Program. The ProgramSpec names the pipe's GEOMETRY (receivers,
-// ring size, entry size); the actual PrefetcherPipe object is supplied at execution
-// time via ProgramRunArgs::prefetcher_pipe_args and must match this geometry.
+// ring size, entry size) in ProgramAdvancedOptions::prefetcher_pipe_parameters; the
+// actual PrefetcherPipe object is supplied at execution time via
+// AdvancedProgramRunArgs::prefetcher_pipe_args and must match this geometry.
+//
+// PrefetcherPipe is a separate experimental effort from the core Metal 2.0 spec, so
+// every piece of its spec surface lives in the *AdvancedOptions structs
+// (advanced_options.hpp); the core KernelSpec / DataflowBufferSpec / ProgramSpec /
+// ProgramRunArgs do not depend on it.
 //
 // The sender is NOT part of the parameter. It is a property of the pipe object (and
 // of its config page): a consumer Program never needs to know where the data comes
@@ -33,7 +39,7 @@ namespace tt::tt_metal::experimental {
 // WorkUnitSpec target; the pipe supplied at run time must have its sender there.
 //
 // KERNEL ACCESS: A data-movement kernel binds pipes via
-//   KernelSpec::prefetcher_pipe_bindings and constructs the device object from the
+//   KernelAdvancedOptions::prefetcher_pipe_bindings and constructs the device object from the
 //   emitted token:
 //     experimental::PrefetcherPipe pipe(pipe::<accessor_name>);
 //   One binding (accessor) may name SEVERAL parameters: on every node the kernel runs
@@ -43,7 +49,7 @@ namespace tt::tt_metal::experimental {
 //   entry_size.
 //   Compute kernels never bind a pipe directly. A receiver-side data-movement kernel
 //   forwards pipe entries to compute through a RELAY DFB: a DataflowBufferSpec whose
-//   `prefetcher_pipe_relays` names the same pipe group as that kernel's accessor,
+//   DFBAdvancedOptions::prefetcher_pipe_relays names the same pipe group as that kernel's accessor,
 //   aliasing the ring as its backing storage. Compute binds that DFB like any other.
 //
 // ROLE: A kernel's role (sender or receiver) is DERIVED from the node coverage of

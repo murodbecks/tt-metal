@@ -6,7 +6,7 @@
 // area using one of the sender write primitives.
 //
 // Bindings:
-//   pipe::out              — KernelSpec::PrefetcherPipeBinding accessor (program slot id baked in)
+//   pipe::out              — KernelAdvancedOptions::PrefetcherPipeBinding accessor (program slot id baked in)
 // Args (named CTAs):
 //   args::entry_size       - bytes per entry (must be L1_ALIGNMENT multiple)
 //   args::num_entries      - number of entries to push per receiver

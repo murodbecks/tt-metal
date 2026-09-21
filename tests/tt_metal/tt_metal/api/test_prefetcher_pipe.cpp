@@ -7,8 +7,8 @@
 // A PrefetcherPipeSpace reserves persistent L1, pipes are carved from it, and every Program is
 // built from a ProgramSpec that declares a PrefetcherPipeParameter with the pipe's geometry.
 // Kernels reach the pipe through pipe::<accessor>; relay DFBs alias the ring through
-// DataflowBufferSpec::prefetcher_pipe_relays; the live pipe object arrives through
-// ProgramRunArgs::prefetcher_pipe_args.
+// DFBAdvancedOptions::prefetcher_pipe_relays; the live pipe object arrives through
+// AdvancedProgramRunArgs::prefetcher_pipe_args.
 
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -176,7 +176,7 @@ m2::PrefetcherPipeParameter pipe_parameter(
 }
 
 void bind_pipe(m2::KernelSpec& kernel, std::vector<m2::PrefetcherPipeParamName> pipes, const std::string& accessor) {
-    kernel.prefetcher_pipe_bindings.push_back(
+    kernel.advanced_options.prefetcher_pipe_bindings.push_back(
         m2::PrefetcherPipeBinding{.pipe_parameter_names = std::move(pipes), .accessor_name = accessor});
 }
 
@@ -233,7 +233,7 @@ m2::ProgramRunArgs pipe_run_args(
     m2::PrefetcherPipe& pipe, std::vector<m2::ProgramRunArgs::KernelRunArgs> kernels = {}) {
     m2::ProgramRunArgs args;
     args.kernel_run_args = std::move(kernels);
-    args.prefetcher_pipe_args.emplace(pipe_param, m2::PrefetcherPipeArgument{pipe});
+    args.advanced_options.prefetcher_pipe_args.emplace(pipe_param, m2::PrefetcherPipeArgument{pipe});
     return args;
 }
 
@@ -247,8 +247,8 @@ Program make_sender_program(distributed::MeshDevice& device, m2::PrefetcherPipe&
     m2::ProgramSpec spec{
         .name = "pipe_sender",
         .kernels = {sender_kernel_spec("sender", {pipe_param}, p)},
-        .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, p.entry_size)},
         .work_units = {work_unit("sender_wu", {"sender"}, pipe.sender_cores())},
+        .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, p.entry_size)}},
     };
     Program program = m2::MakeProgramFromSpec(device, spec);
     prefetcher_pipe_test::write_sender_l1_staging(
@@ -273,8 +273,8 @@ Program make_receiver_program(
     m2::ProgramSpec spec{
         .name = "pipe_receiver",
         .kernels = {receiver_kernel_spec("receiver", {pipe_param}, num_entries, num_threads)},
-        .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, entry_size)},
         .work_units = {work_unit("receiver_wu", {"receiver"}, pipe.receiver_cores())},
+        .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, entry_size)}},
     };
     Program program = m2::MakeProgramFromSpec(device, spec);
     m2::SetProgramRunArgs(program, pipe_run_args(pipe));
@@ -346,10 +346,10 @@ void spin_pipe_credits(
     m2::ProgramSpec spec{
         .name = "pipe_credit_spin",
         .kernels = {spin_kernel("spin_sender", 1u), spin_kernel("spin_receiver", 0u)},
-        .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, entry_size)},
         .work_units =
             {work_unit("sender_wu", {"spin_sender"}, pipe.sender_cores()),
              work_unit("receiver_wu", {"spin_receiver"}, pipe.receiver_cores())},
+        .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, entry_size)}},
     };
     Program program = m2::MakeProgramFromSpec(*mesh_device, spec);
     m2::SetProgramRunArgs(program, pipe_run_args(pipe));
@@ -534,7 +534,7 @@ RelayConsumerSpecs make_relay_consumer(std::vector<m2::PrefetcherPipeParamName> 
                 .entry_size = p.entry_size,
                 .num_entries = p.ring_depth,
                 .data_format_metadata = tt::DataFormat::Float16_b,
-                .prefetcher_pipe_relays = pipes,
+                .advanced_options = {.prefetcher_pipe_relays = pipes},
             },
     };
     bind_pipe(c.receiver, std::move(pipes), "in");
@@ -730,10 +730,10 @@ uint32_t run_prefetcher_pipe_relay(
             .name = "pipe_relay_same_program",
             .kernels = {sender_kernel_spec("sender", {pipe_param}, sender_params), consumer.receiver, consumer.compute},
             .dataflow_buffers = {consumer.relay},
-            .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, params.entry_size)},
             .work_units =
                 {work_unit("sender_wu", {"sender"}, pipe.sender_cores()),
                  work_unit("receiver_wu", {"receiver", "compute"}, receiver_cores)},
+            .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, params.entry_size)}},
         };
         Program program = m2::MakeProgramFromSpec(device, spec);
         // The relay DFB has no address until the pipe binds.
@@ -763,8 +763,8 @@ uint32_t run_prefetcher_pipe_relay(
             .name = "pipe_relay_consumer",
             .kernels = {consumer.receiver, consumer.compute},
             .dataflow_buffers = {consumer.relay},
-            .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, recv_entry_size)},
             .work_units = {work_unit("receiver_wu", {"receiver", "compute"}, receiver_cores)},
+            .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, recv_entry_size)}},
         };
         Program program_consumer = m2::MakeProgramFromSpec(device, consumer_spec);
         m2::SetProgramRunArgs(
@@ -826,8 +826,8 @@ m2::ProgramSpec receiver_program_spec(const m2::PrefetcherPipe& pipe, const Rece
         return m2::ProgramSpec{
             .name = "pipe_receiver_spec",
             .kernels = {receiver_kernel_spec("receiver", {pipe_param}, ring_depth, p.num_threads)},
-            .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, p.entry_size)},
             .work_units = {work_unit("receiver_wu", {"receiver"}, pipe.receiver_cores())},
+            .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, p.entry_size)}},
         };
     }
     RelayConsumerSpecs consumer = make_relay_consumer(
@@ -845,8 +845,8 @@ m2::ProgramSpec receiver_program_spec(const m2::PrefetcherPipe& pipe, const Rece
         .name = "pipe_relay_receiver_spec",
         .kernels = {consumer.receiver, consumer.compute},
         .dataflow_buffers = {consumer.relay},
-        .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, p.entry_size)},
         .work_units = {work_unit("receiver_wu", {"receiver", "compute"}, pipe.receiver_cores())},
+        .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, p.entry_size)}},
     };
 }
 
@@ -1058,8 +1058,8 @@ TEST_F(PrefetcherPipeFixture, ProgramSpec_EntrySizeRejects) {
         m2::ProgramSpec spec{
             .name = "bad_entry_size",
             .kernels = {sender_kernel_spec("sender", {pipe_param}, {.entry_size = entry_size})},
-            .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, entry_size)},
             .work_units = {work_unit("sender_wu", {"sender"}, pipe.sender_cores())},
+            .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, entry_size)}},
         };
         EXPECT_THROW(m2::MakeProgramFromSpec(*mesh_device, spec), std::exception) << "entry_size=" << entry_size;
     }
@@ -1082,8 +1082,8 @@ TEST_F(PrefetcherPipeFixture, ProgramSpec_RequiresRoleCompleteKernel) {
         m2::ProgramSpec spec{
             .name = "partial_receivers",
             .kernels = {receiver_kernel_spec("receiver", {pipe_param}, 4)},
-            .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, 256)},
             .work_units = {work_unit("receiver_wu", {"receiver"}, CoreCoord(2, 0))},
+            .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, 256)}},
         };
         EXPECT_THROW(m2::MakeProgramFromSpec(*mesh_device, spec), std::exception);
     }
@@ -1110,10 +1110,11 @@ TEST_F(PrefetcherPipeFixture, ProgramSpec_AssignsDistinctSlotsPerAccessor) {
     m2::ProgramSpec spec{
         .name = "two_slots",
         .kernels = {sender0, sender1},
-        .prefetcher_pipe_parameters = {pipe_parameter(name0, pipe0, 256), pipe_parameter(name1, pipe1, 256)},
         .work_units =
             {work_unit("sender0_wu", {"sender0"}, pipe0.sender_cores()),
              work_unit("sender1_wu", {"sender1"}, pipe1.sender_cores())},
+        .advanced_options =
+            {.prefetcher_pipe_parameters = {pipe_parameter(name0, pipe0, 256), pipe_parameter(name1, pipe1, 256)}},
     };
     Program program = m2::MakeProgramFromSpec(*mesh_device, spec);
     EXPECT_EQ(program.impl().num_prefetcher_pipe_slots(), 2u);
@@ -1124,7 +1125,7 @@ TEST_F(PrefetcherPipeFixture, ProgramSpec_AssignsDistinctSlotsPerAccessor) {
     EXPECT_EQ(per_core.at(CoreCoord(0, 1))[0].prefetcher_pipe_id, 1u);
 
     m2::ProgramRunArgs args;
-    args.prefetcher_pipe_args = {
+    args.advanced_options.prefetcher_pipe_args = {
         {name0, m2::PrefetcherPipeArgument{pipe0}}, {name1, m2::PrefetcherPipeArgument{pipe1}}};
     m2::SetProgramRunArgs(program, args);
     EXPECT_EQ(per_core.at(CoreCoord(0, 0))[0].pipe, &pipe0.impl());
@@ -1598,8 +1599,8 @@ TEST_F(PrefetcherPipeFixture, PrefetcherPipe_StaleCommitRejected) {
     m2::ProgramSpec spec{
         .name = "pipe_stale_commit",
         .kernels = {sender},
-        .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, entry_size)},
         .work_units = {work_unit("sender_wu", {"sender"}, pipe.sender_cores())},
+        .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, entry_size)}},
     };
     Program program = m2::MakeProgramFromSpec(device, spec);
     prefetcher_pipe_test::write_sender_l1_staging(
@@ -1713,7 +1714,7 @@ TEST_F(PrefetcherPipeFixture, PrefetcherPipe_RelayDFB_HostRelationshipValidation
     {
         // A relay whose producer does not bind the relayed pipe is rejected.
         m2::ProgramSpec spec = receiver_program_spec(pipe, {.entry_size = 256, .with_relay = true});
-        spec.kernels[0].prefetcher_pipe_bindings.clear();
+        spec.kernels[0].advanced_options.prefetcher_pipe_bindings.clear();
         EXPECT_THROW(m2::MakeProgramFromSpec(*mesh_device, spec), std::exception);
     }
 }
@@ -2530,8 +2531,8 @@ TEST_F(PrefetcherPipeFixture, PrefetcherPipe_CrossSubDevice_CoordinatedLivePeerN
     m2::ProgramSpec spec_a{
         .name = "resize_sender",
         .kernels = {sender_kernel},
-        .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, e1)},
         .work_units = {work_unit("sender_wu", {"sender"}, sender_cores)},
+        .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, e1)}},
     };
     Program program_a = m2::MakeProgramFromSpec(device, spec_a);
     prefetcher_pipe_test::write_sender_l1_staging(
@@ -2603,8 +2604,8 @@ TEST_F(PrefetcherPipeFixture, PrefetcherPipe_CrossSubDevice_CoordinatedLivePeerN
     m2::ProgramSpec spec_b{
         .name = "resize_receiver",
         .kernels = {receiver_b},
-        .prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, e1)},
         .work_units = {work_unit("receiver_wu", {"receiver"}, receiver_cores)},
+        .advanced_options = {.prefetcher_pipe_parameters = {pipe_parameter(pipe_param, pipe, e1)}},
     };
     Program program_b = m2::MakeProgramFromSpec(device, spec_b);
     m2::SetProgramRunArgs(program_b, pipe_run_args(pipe));
@@ -2699,7 +2700,7 @@ TEST_F(PrefetcherPipeFixture, PrefetcherPipe_MultiPipeAccessor_CrossProgram_2S2R
     const auto two_pipe_args = [&](std::vector<m2::ProgramRunArgs::KernelRunArgs> kernels) {
         m2::ProgramRunArgs args;
         args.kernel_run_args = std::move(kernels);
-        args.prefetcher_pipe_args = {
+        args.advanced_options.prefetcher_pipe_args = {
             {name_a, m2::PrefetcherPipeArgument{pipe_a}}, {name_b, m2::PrefetcherPipeArgument{pipe_b}}};
         return args;
     };
@@ -2717,8 +2718,8 @@ TEST_F(PrefetcherPipeFixture, PrefetcherPipe_MultiPipeAccessor_CrossProgram_2S2R
         .name = "pipe_2s2r_receivers",
         .kernels = {consumer.receiver, consumer.compute},
         .dataflow_buffers = {consumer.relay},
-        .prefetcher_pipe_parameters = pipe_params,
         .work_units = {work_unit("receiver_wu", {"receiver", "compute"}, receiver_cores)},
+        .advanced_options = {.prefetcher_pipe_parameters = pipe_params},
     };
     Program receiver_program = m2::MakeProgramFromSpec(device, receiver_spec);
     EXPECT_EQ(receiver_program.impl().num_prefetcher_pipe_slots(), 1u);
@@ -2737,8 +2738,8 @@ TEST_F(PrefetcherPipeFixture, PrefetcherPipe_MultiPipeAccessor_CrossProgram_2S2R
     m2::ProgramSpec sender_spec{
         .name = "pipe_2s2r_senders",
         .kernels = {sender_kernel_spec("sender", {name_a, name_b}, sender_params)},
-        .prefetcher_pipe_parameters = pipe_params,
         .work_units = {work_unit("sender_wu", {"sender"}, sender_cores)},
+        .advanced_options = {.prefetcher_pipe_parameters = pipe_params},
     };
     Program sender_program = m2::MakeProgramFromSpec(device, sender_spec);
     EXPECT_EQ(sender_program.impl().num_prefetcher_pipe_slots(), 1u);

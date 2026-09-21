@@ -15,7 +15,7 @@
 #include <tt-metalium/experimental/metal2_host_api/semaphore_spec.hpp>
 #include <tt-metalium/experimental/metal2_host_api/scratchpad_spec.hpp>
 #include <tt-metalium/experimental/metal2_host_api/tensor_parameter.hpp>
-#include <tt-metalium/experimental/metal2_host_api/prefetcher_pipe_parameter.hpp>
+#include <tt-metalium/experimental/metal2_host_api/advanced_options.hpp>
 #include <tt-metalium/experimental/metal2_host_api/node_coord.hpp>
 #include <tt-metalium/experimental/metal2_host_api/utility/group.hpp>
 
@@ -94,16 +94,14 @@ struct ProgramSpec {
     // (The actual MeshTensors are supplied via ProgramRunArgs.)
     Group<TensorParameter> tensor_parameters;
 
-    // PrefetcherPipe parameter declarations
-    // Names the geometry (receivers, ring size, entry size) of each durable PrefetcherPipe
-    // the Program's kernels take part in. (The actual PrefetcherPipe objects are supplied via
-    // ProgramRunArgs.) A kernel's sender/receiver role is derived from its WorkUnitSpec node coverage.
-    Group<PrefetcherPipeParameter> prefetcher_pipe_parameters;
-
     // WorkUnit specifications:
     // A valid ProgramSpec has at least one WorkUnitSpec.
     // Each kernel must be referenced by at least one WorkUnitSpec.
     Group<WorkUnitSpec> work_units;
+
+    // Advanced options (see advanced_options.hpp)
+    // Experimental PrefetcherPipe parameter declarations live here.
+    ProgramAdvancedOptions advanced_options;
 };
 
 }  // namespace tt::tt_metal::experimental

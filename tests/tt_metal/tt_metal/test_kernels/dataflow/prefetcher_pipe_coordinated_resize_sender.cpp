@@ -13,7 +13,7 @@
 //   6. Push num_entries_e2 at E2
 //
 // Bindings:
-//   pipe::out              — KernelSpec::PrefetcherPipeBinding accessor (program slot id baked in)
+//   pipe::out              — KernelAdvancedOptions::PrefetcherPipeBinding accessor (program slot id baked in)
 // Args (named CTAs):
 //   args::entry_size_e1
 //   args::num_entries_e1

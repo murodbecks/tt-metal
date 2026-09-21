@@ -153,7 +153,7 @@ struct ScratchpadBindingHandle {
     uint32_t allocated_address = 0;  // L1 base address; filled by allocate_scratchpads (0 until allocated)
 };
 
-// Metal 2.0: per-kernel resolved PrefetcherPipe accessor (KernelSpec::PrefetcherPipeBinding).
+// Metal 2.0: per-kernel resolved PrefetcherPipe accessor (KernelAdvancedOptions::PrefetcherPipeBinding).
 // One accessor names one program PrefetcherPipe slot (dense id the kernel constructs its
 // PrefetcherPipe with); the slot resolves to whichever pipe of the accessor's group is present
 // on the executing node. Emitted as a constexpr token in the `pipe::` namespace.

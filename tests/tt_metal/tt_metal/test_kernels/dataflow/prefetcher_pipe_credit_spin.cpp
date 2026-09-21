@@ -8,7 +8,7 @@
 // KernelSpecs, one per role) and run concurrently.
 //
 // Bindings:
-//   pipe::pipe             — KernelSpec::PrefetcherPipeBinding accessor (program slot id baked in)
+//   pipe::pipe             — KernelAdvancedOptions::PrefetcherPipeBinding accessor (program slot id baked in)
 // Args (named CTAs):
 //   args::num_ops          - reserve+push (sender) or wait+pop (receiver) iterations
 //   args::entries_per_op   - entries credited per iteration

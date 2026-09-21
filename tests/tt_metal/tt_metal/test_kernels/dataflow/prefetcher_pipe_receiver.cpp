@@ -5,7 +5,7 @@
 // PrefetcherPipe receiver kernel: wait for entries and pop.
 //
 // Bindings:
-//   pipe::in               — KernelSpec::PrefetcherPipeBinding accessor (program slot id baked in)
+//   pipe::in               — KernelAdvancedOptions::PrefetcherPipeBinding accessor (program slot id baked in)
 // Args (named CTAs):
 //   args::num_entries      - total dense entries in this epoch (must be divisible by
 //                            get_num_threads() when multi-DM lane credits are armed)

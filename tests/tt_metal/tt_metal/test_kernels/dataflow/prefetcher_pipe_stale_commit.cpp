@@ -5,7 +5,7 @@
 // Sender-only kernel that proves commit() rejects a stale entry_size epoch.
 //
 // Bindings:
-//   pipe::out              — KernelSpec::PrefetcherPipeBinding accessor (program slot id baked in)
+//   pipe::out              — KernelAdvancedOptions::PrefetcherPipeBinding accessor (program slot id baked in)
 // Args (named CTAs):
 //   args::entry_size       - initial / dense-slot size (E1)
 //   args::new_entry_size   - resize target (E2); must differ from E1

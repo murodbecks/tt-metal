@@ -5,7 +5,7 @@
 // PrefetcherPipe DM receiver bridging the pipe ring to TRISC through a relay DFB.
 //
 // Bindings:
-//   pipe::in               — KernelSpec::PrefetcherPipeBinding accessor (program slot id baked in)
+//   pipe::in               — KernelAdvancedOptions::PrefetcherPipeBinding accessor (program slot id baked in)
 //   (relay DFB)            — bound as PRODUCER; reached through pipe.bind_relay(), no dfb:: token
 // Args (named CTAs):
 //   args::total_entries    - pipe entries this core consumes over the run

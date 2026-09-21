@@ -64,7 +64,7 @@ private:
     uint8_t prefetcher_pipe_id_;
 };
 
-// Compile-time handle for a PrefetcherPipe accessor (KernelSpec::PrefetcherPipeBinding),
+// Compile-time handle for a PrefetcherPipe accessor (KernelAdvancedOptions::PrefetcherPipeBinding),
 // emitted into kernel_bindings_generated.h in the `pipe::` namespace. Carries the program's
 // PrefetcherPipe slot id; the slot resolves, on the executing node, to whichever pipe of the
 // accessor's group is present there (the host fills every node's slot record from that pipe).

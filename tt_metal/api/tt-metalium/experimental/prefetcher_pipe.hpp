@@ -53,7 +53,7 @@ class PrefetcherPipeSpaceImpl;
  *   PrefetcherPipe pipe = space.create_pipe(sender_core, receiver_cores);
  *   // ProgramSpec declares a PrefetcherPipeParameter with the same receivers / ring size (the
  *   // sender is the pipe's, not the spec's); kernels bind it via
- *   // KernelSpec::prefetcher_pipe_bindings; ProgramRunArgs::prefetcher_pipe_args supplies `pipe`.
+ *   // KernelAdvancedOptions::prefetcher_pipe_bindings; AdvancedProgramRunArgs::prefetcher_pipe_args supplies `pipe`.
  *
  * Device kernel flows (sender / receiver / relay) are documented on the device API:
  *   tt_metal/hw/inc/api/dataflow/prefetcher_pipe.h
@@ -202,9 +202,9 @@ PrefetcherPipeSpace CreatePrefetcherPipeSpace(distributed::MeshDevice* device, c
 
 // A Program uses a pipe through the Metal 2.0 host API only: declare a PrefetcherPipeParameter
 // with the pipe's geometry in the ProgramSpec, bind it from data-movement kernels via
-// KernelSpec::prefetcher_pipe_bindings (optionally aliasing its ring with a relay DFB through
-// DataflowBufferSpec::prefetcher_pipe_relays), then supply the PrefetcherPipe object in
-// ProgramRunArgs::prefetcher_pipe_args. See metal2_host_api/prefetcher_pipe_parameter.hpp.
+// KernelAdvancedOptions::prefetcher_pipe_bindings (optionally aliasing its ring with a relay DFB through
+// DFBAdvancedOptions::prefetcher_pipe_relays), then supply the PrefetcherPipe object in
+// AdvancedProgramRunArgs::prefetcher_pipe_args. See metal2_host_api/prefetcher_pipe_parameter.hpp.
 
 }  // namespace experimental
 }  // namespace tt::tt_metal
