@@ -77,9 +77,10 @@ def test_rejected_close_preserves_default(expect_error):
     mesh = ttnn.open_mesh_device(mesh_shape=ttnn.MeshShape(1, 1))
     submesh = mesh.create_submesh(ttnn.MeshShape(1, 1))
     try:
-        # Events mark both overlapping queues in use without launching a kernel.
-        ttnn.record_event(mesh, 0)
-        ttnn.record_event(submesh, 0)
+        # Drain each host completion before switching meshes: the completion queue
+        # is shared, but both meshes retain their in-use flags for close validation.
+        ttnn.event_synchronize(ttnn.record_event(mesh, 0))
+        ttnn.event_synchronize(ttnn.record_event(submesh, 0))
         ttnn.SetDefaultDevice(mesh)
         with expect_error(RuntimeError, "in use by child submesh"):
             ttnn.close_mesh_device(mesh)
