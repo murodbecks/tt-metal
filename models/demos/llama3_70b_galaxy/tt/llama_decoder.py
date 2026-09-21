@@ -10,6 +10,44 @@ from models.common.lightweightmodule import LightweightModule
 from models.demos.llama3_70b_galaxy.tt.distributed_norm import DistributedNorm
 
 
+_PROBE_DUMPED = set()
+
+
+def _probe_l1(mesh_device, tag):
+    import glob
+    import os
+
+    from loguru import logger
+
+    mv = ttnn.get_memory_view(mesh_device, ttnn.BufferType.L1)
+    logger.info(
+        f"[L1 probe] {tag}: allocated_per_bank={mv.total_bytes_allocated_per_bank} "
+        f"free_per_bank={mv.total_bytes_free_per_bank} largest_free={mv.largest_contiguous_bytes_free_per_bank}"
+    )
+    key = tag.split(" (")[0]
+    if key in _PROBE_DUMPED:
+        return
+    _PROBE_DUMPED.add(key)
+    prefix = f"probe_{len(_PROBE_DUMPED)}_"
+    ttnn.dump_device_memory_state(mesh_device, prefix)
+    paths = glob.glob(
+        os.path.join(os.environ.get("TT_METAL_HOME", "."), "generated", "reports", f"{prefix}detailed_memory_usage.csv")
+    )
+    paths += glob.glob(f"**/{prefix}detailed_memory_usage.csv", recursive=True)
+    for path in paths[:1]:
+        lines = open(path).read().splitlines()
+        out = []
+        in_l1 = False
+        for line in lines:
+            if line.endswith(",L1"):
+                in_l1 = True
+            if in_l1:
+                out.append(line.strip())
+                if len(out) > 140:
+                    break
+        logger.info("[L1 probe] blocks: " + " | ".join(out))
+
+
 class TtTransformerBlock(LightweightModule):
     def __init__(
         self,
@@ -147,6 +185,8 @@ class TtTransformerBlock(LightweightModule):
     ) -> ttnn.Tensor:
         # x contains input in layer 0 and ffout of previous layer thereafter, x should be dealocated
         # h contains 0 in layer 0 and h_prev+x_prev+attn_out_prev thereafter, h is persistent
+        if mode == "prefill" and self.layer_num == 0:
+            _probe_l1(self.args.mesh_device, f"decoder layer 0 prefill entry (seq={x.shape[-2]}, batch={batch_size})")
         skip_mem_cfg = self.model_config["DECODE_RESIDUAL_MEMCFG"] if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
         # On the BH no-prefetch path the residual stream defaults to bf8, so it is re-quantized on
         # every layer's residual add. Over 64 layers that accumulated bf8 error degrades the final

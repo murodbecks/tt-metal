@@ -1265,6 +1265,7 @@ class Generator(WarmupForwardMixin):
         call that follows it, allocate behind the N-1 traces already captured.
         """
         # Get host tensors (tokens, user_id, page_table, chunk_page_table, chunk_start_idx, column_mask)
+        self._log_l1_probe("prefill trace prepare: before inputs")
         host_inputs = self.model.prepare_prefill_inputs_host(
             tokens,
             user_id=user_id,
