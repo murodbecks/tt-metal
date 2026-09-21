@@ -82,7 +82,9 @@ ttnn::device_operation::ProgramArtifacts fold_multi_core_tiled_interleaved(
         nblocks_per_core,
         nblocks_per_core_cliff);
 
-    const uint32_t num_input_tiles = tiles_per_channel_dim;
+    // Double-buffered per C-tile (kFoldSrcCbDepthPerCTile) so reader/compute/writer overlap through
+    // a super-block; predicate in quasar/fold_device_op.cpp scales cb_bytes by the same constant.
+    const uint32_t num_input_tiles = tiles_per_channel_dim * kFoldSrcCbDepthPerCTile;
 
     // ---- Resource names ----
     const TensorParamName INPUT{"input"};
