@@ -1773,6 +1773,32 @@ class Generator(WarmupForwardMixin):
                         break
             logger.info("[L1 probe] " + " | ".join(out))
 
+    def _scan_live_l1_tensors(self, tag):
+        import gc
+
+        seen = 0
+        for obj in gc.get_objects():
+            if not isinstance(obj, ttnn.Tensor):
+                continue
+            try:
+                if obj.storage_type() != ttnn.StorageType.DEVICE:
+                    continue
+                mc = obj.memory_config()
+                if mc.buffer_type != ttnn.BufferType.L1:
+                    continue
+                try:
+                    addr = obj.buffer_address()
+                except Exception:
+                    addr = -1
+                seen += 1
+                logger.info(
+                    f"[L1 probe] live L1 tensor ({tag}): shape={tuple(obj.shape)} dtype={obj.dtype} layout={obj.layout} "
+                    f"memlayout={mc.memory_layout} addr={addr} shard={mc.shard_spec}"
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.info(f"[L1 probe] live tensor scan skipped one object: {e}")
+        logger.info(f"[L1 probe] live L1 tensors ({tag}): {seen}")
+
     def _log_l1_probe(self, tag):
         mv = ttnn.get_memory_view(self.mesh_device, ttnn.BufferType.L1)
         logger.info(
@@ -1805,6 +1831,7 @@ class Generator(WarmupForwardMixin):
         )
         logger.info("Done Compiling Model")
         self._log_l1_probe("after decode compile run")
+        self._scan_live_l1_tensors("after decode compile run")
 
         # Get inputs ready for trace run
         tokens_tt, current_pos_tt, rope_idxs_tt, page_table_tt = self.model.prepare_inputs_decode(
