@@ -15,9 +15,10 @@
 #include "experimental/kernel_args.h"
 
 void kernel_main() {
-    uint32_t NHtWt = get_arg(args::NHtWt);
     compute_kernel_hw_startup(dfb::in, dfb::out);
     transpose_init(dfb::in);
+
+    constexpr uint32_t NHtWt = get_arg(args::NHtWt);
 
     DataflowBuffer dfb_in(dfb::in);
     DataflowBuffer dfb_out(dfb::out);

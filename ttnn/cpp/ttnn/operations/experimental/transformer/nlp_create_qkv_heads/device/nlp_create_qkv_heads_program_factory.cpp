@@ -30,18 +30,26 @@ struct InterleavedWorkSplit {
     CoreRangeSet core_group_2;
     uint32_t num_blocks_per_core_group_1 = 0;
     uint32_t num_blocks_per_core_group_2 = 0;
+    // Q-only head creation with fewer sequence blocks than cores splits the work per (batch, head) instead:
+    // a block is then one head row rather than one full input row.
+    bool head_parallel = false;
 };
 
-InterleavedWorkSplit build_interleaved_work_split(const Tensor& input_tensor) {
+InterleavedWorkSplit build_interleaved_work_split(
+    const NlpCreateHeadsDeviceOperation::operation_attributes_t& operation_attributes, const Tensor& input_tensor) {
     const auto& input_shape = input_tensor.padded_shape();
     const CoreCoord grid = input_tensor.device()->compute_with_storage_grid_size();
     const uint32_t num_cores_y = grid.y;
-    // Block is a unit of work; ie. num of in0_w_tiles per core
-    const uint32_t num_blocks = input_shape[0] * input_shape[1] * input_shape[2] / TILE_HEIGHT;
+    const uint32_t sequence_blocks = input_shape[0] * input_shape[1] * input_shape[2] / TILE_HEIGHT;
+    // Split heads only when the Q-only sequence split would leave cores idle.
+    const bool head_parallel = operation_attributes.num_kv_heads == 0 && operation_attributes.num_q_heads > 1 &&
+                               !operation_attributes.transpose_k_heads && sequence_blocks < grid.x * grid.y;
+    const uint32_t num_blocks = sequence_blocks * (head_parallel ? operation_attributes.num_q_heads : 1);
     auto [num_cores, all_cores, core_group_1, core_group_2, blocks_group_1, blocks_group_2] =
         tt::tt_metal::split_work_to_cores(grid, num_blocks);
 
     InterleavedWorkSplit split;
+    split.head_parallel = head_parallel;
     split.all_cores = std::move(all_cores);
     split.core_group_1 = std::move(core_group_1);
     split.core_group_2 = std::move(core_group_2);
@@ -52,6 +60,32 @@ InterleavedWorkSplit build_interleaved_work_split(const Tensor& input_tensor) {
         split.cores.push_back(CoreCoord{i / num_cores_y, i % num_cores_y});
     }
     return split;
+}
+
+// The five tensor arguments both factories bind: the Q input, the optional separate KV input and the three
+// outputs.  The names must match the TensorParameter unique_ids the factories declare.  Shared by
+// create_program_artifacts and override_runtime_arguments of both factories so a renamed or added tensor
+// parameter cannot drift between them.
+using TensorRunArgs = decltype(tt::tt_metal::experimental::ProgramRunArgs::tensor_args);
+TensorRunArgs build_qkv_tensor_run_args(
+    const NlpCreateHeadsDeviceOperation::tensor_args_t& tensor_args,
+    NlpCreateHeadsDeviceOperation::tensor_return_value_t& output) {
+    const TensorParamName INPUT_Q{"input_q"};
+    const TensorParamName INPUT_KV{"input_kv"};
+    const TensorParamName Q{"q"};
+    const TensorParamName K{"k"};
+    const TensorParamName V{"v"};
+
+    TensorRunArgs tensor_run_args = {
+        {INPUT_Q, tensor_args.input_tensor_q.mesh_tensor()},
+        {Q, std::get<0>(output).mesh_tensor()},
+        {K, std::get<1>(output).mesh_tensor()},
+        {V, std::get<2>(output).mesh_tensor()},
+    };
+    if (tensor_args.input_tensor_kv.has_value()) {
+        tensor_run_args.emplace(INPUT_KV, tensor_args.input_tensor_kv->mesh_tensor());
+    }
+    return tensor_run_args;
 }
 
 }  // namespace
@@ -118,7 +152,7 @@ ttnn::device_operation::ProgramArtifacts NlpCreateHeadsDeviceOperation::Interlea
     uint32_t q_num_tiles = num_q_heads * q_out_w_tiles;
     uint32_t kv_num_tiles = num_kv_heads * q_out_w_tiles;
 
-    const auto split = build_interleaved_work_split(input_tensor);
+    const auto split = build_interleaved_work_split(operation_attributes, input_tensor);
     const auto& core_group_1 = split.core_group_1;
     const auto& core_group_2 = split.core_group_2;
     const uint32_t num_blocks_per_core_group_1 = split.num_blocks_per_core_group_1;
@@ -134,11 +168,6 @@ ttnn::device_operation::ProgramArtifacts NlpCreateHeadsDeviceOperation::Interlea
     TT_ASSERT(q.buffer() != nullptr, "Output q buffer should be allocated on device!");
     TT_ASSERT(k.buffer() != nullptr, "Output k buffer should be allocated on device!");
     TT_ASSERT(v.buffer() != nullptr, "Output v buffer should be allocated on device!");
-
-    const auto& input_q_mesh = input_tensor.mesh_tensor();
-    const auto& q_mesh = q.mesh_tensor();
-    const auto& k_mesh = k.mesh_tensor();
-    const auto& v_mesh = v.mesh_tensor();
 
     ////////////////////////////////////////////////////////////////////////////
     //                      Application Setup
@@ -196,6 +225,9 @@ ttnn::device_operation::ProgramArtifacts NlpCreateHeadsDeviceOperation::Interlea
             {
                 {"q_num_tiles", q_num_tiles},
                 {"kv_num_tiles", kv_num_tiles},
+                {"head_parallel", static_cast<uint32_t>(split.head_parallel)},
+                {"head_tiles", q_out_w_tiles},
+                {"seq_tiles", q_out_h_tiles},
             },
         .runtime_arg_schema = {.runtime_arg_names = {"num_blocks", "in0_tensor_tile_id", "in1_tensor_tile_id"}},
         .hw_config = ttnn::create_reader_datamovement_config(arch),
@@ -237,6 +269,10 @@ ttnn::device_operation::ProgramArtifacts NlpCreateHeadsDeviceOperation::Interlea
                 {"q_out_HtWt", q_out_HtWt},
                 {"q_out_c", num_q_heads},
                 {"kv_out_c", num_kv_heads},
+                {"head_parallel", static_cast<uint32_t>(split.head_parallel)},
+                // Non-zero only for the Q head split: output 0 takes the first split_width tiles of every
+                // head row and output 1 (bound as K) the rest.
+                {"split_width", static_cast<uint32_t>(operation_attributes.q_head_split.value_or(0) / TILE_WIDTH)},
             },
         .runtime_arg_schema =
             {.runtime_arg_names =
@@ -251,8 +287,8 @@ ttnn::device_operation::ProgramArtifacts NlpCreateHeadsDeviceOperation::Interlea
     }
 
     // Dataflow buffers
-    uint32_t micro_block_size = 1;                  // Num tiles to read/wait for in reader and writer
-    uint32_t dfb_num_tiles = micro_block_size * 4;  // Quadruple buffer everything
+    // Four-tile capacity: quadruple buffering for the one-tile paths, one batched head transfer otherwise.
+    uint32_t dfb_num_tiles = 4;
 
     // TODO: Investigate perf allocating full in0_w_tiles with double buffer
     // uint32_t qv_num_tiles = in0_w_tiles * 2; // double buffer; this runs out of space for generic shapes
@@ -375,7 +411,8 @@ ttnn::device_operation::ProgramArtifacts NlpCreateHeadsDeviceOperation::Interlea
             core,
             {
                 {"num_blocks", num_blocks_per_core},
-                {"in0_tensor_tile_id", num_blocks_written * in0_w_tiles},
+                // Head-parallel blocks are (batch, head, row) indices the reader decodes itself.
+                {"in0_tensor_tile_id", split.head_parallel ? num_blocks_written : num_blocks_written * in0_w_tiles},
                 {"in1_tensor_tile_id", num_blocks_written * in1_w_tiles},
             });
 
@@ -385,7 +422,8 @@ ttnn::device_operation::ProgramArtifacts NlpCreateHeadsDeviceOperation::Interlea
             {
                 {"num_blocks", num_blocks_per_core},
                 {"q_out_h_dim", q_out_h_dim},
-                {"q_out_tensor_tile_id", q_out_tensor_tile_id},
+                {"q_out_tensor_tile_id",
+                 split.head_parallel ? num_blocks_written * q_out_w_tiles : q_out_tensor_tile_id},
                 {"k_out_tensor_tile_id", k_out_tensor_tile_id},
                 {"v_out_tensor_tile_id", v_out_tensor_tile_id},
             });
@@ -423,10 +461,7 @@ ttnn::device_operation::ProgramArtifacts NlpCreateHeadsDeviceOperation::Interlea
 
     ProgramRunArgs run_args;
     run_args.kernel_run_args = {std::move(reader_run_args), std::move(writer_run_args)};
-    run_args.tensor_args = {{INPUT_Q, input_q_mesh}, {Q, q_mesh}, {K, k_mesh}, {V, v_mesh}};
-    if (read_from_input_tensor_kv) {
-        run_args.tensor_args.emplace(INPUT_KV, input_tensor_kv->mesh_tensor());
-    }
+    run_args.tensor_args = build_qkv_tensor_run_args(tensor_args, output);
 
     return ttnn::device_operation::ProgramArtifacts{.spec = std::move(spec), .run_params = std::move(run_args)};
 }
@@ -596,7 +631,7 @@ ShardedArgs build_sharded_core_args(
             remote_kv_head_start_idx = (remote_kv_head_start_idx + per_core_out_kv_heads) % per_core_in_kv_heads;
         }
 
-        args.cores.push_back(std::move(e));
+        args.cores.push_back(e);
     }
 
     return args;
@@ -855,15 +890,7 @@ ttnn::device_operation::ProgramArtifacts NlpCreateHeadsDeviceOperation::Sharded:
         run_args.kernel_run_args.push_back(std::move(reader_q_run_args));
         run_args.kernel_run_args.push_back(std::move(writer_q_run_args));
     }
-    run_args.tensor_args = {
-        {INPUT_Q, input_tensor.mesh_tensor()},
-        {Q, std::get<0>(output).mesh_tensor()},
-        {K, std::get<1>(output).mesh_tensor()},
-        {V, std::get<2>(output).mesh_tensor()},
-    };
-    if (read_from_input_tensor_kv) {
-        run_args.tensor_args.emplace(INPUT_KV, input_tensor_kv->mesh_tensor());
-    }
+    run_args.tensor_args = build_qkv_tensor_run_args(tensor_args, output);
 
     return ttnn::device_operation::ProgramArtifacts{.spec = std::move(spec), .run_params = std::move(run_args)};
 }
@@ -877,24 +904,8 @@ tt::tt_metal::experimental::ProgramRunArgs NlpCreateHeadsDeviceOperation::Sharde
     const tensor_args_t& tensor_args,
     tensor_return_value_t& tensor_return_value,
     const std::optional<ttnn::MeshCoordinate>& /*mesh_dispatch_coordinate*/) {
-    // Spec resource names — must match create_program_artifacts.
-    const TensorParamName INPUT_Q{"input_q"};
-    const TensorParamName INPUT_KV{"input_kv"};
-    const TensorParamName Q{"q"};
-    const TensorParamName K{"k"};
-    const TensorParamName V{"v"};
-    auto& output = tensor_return_value;
-
     ProgramRunArgs params;
-    params.tensor_args = {
-        {INPUT_Q, tensor_args.input_tensor_q.mesh_tensor()},
-        {Q, std::get<0>(output).mesh_tensor()},
-        {K, std::get<1>(output).mesh_tensor()},
-        {V, std::get<2>(output).mesh_tensor()},
-    };
-    if (tensor_args.input_tensor_kv.has_value()) {
-        params.tensor_args.emplace(INPUT_KV, tensor_args.input_tensor_kv->mesh_tensor());
-    }
+    params.tensor_args = build_qkv_tensor_run_args(tensor_args, tensor_return_value);
     return params;
 }
 
@@ -905,24 +916,8 @@ tt::tt_metal::experimental::ProgramRunArgs NlpCreateHeadsDeviceOperation::Interl
     const tensor_args_t& tensor_args,
     tensor_return_value_t& tensor_return_value,
     const std::optional<ttnn::MeshCoordinate>& /*mesh_dispatch_coordinate*/) {
-    // Spec resource names — must match create_program_artifacts.
-    const TensorParamName INPUT_Q{"input_q"};
-    const TensorParamName INPUT_KV{"input_kv"};
-    const TensorParamName Q{"q"};
-    const TensorParamName K{"k"};
-    const TensorParamName V{"v"};
-    auto& output = tensor_return_value;
-
     ProgramRunArgs params;
-    params.tensor_args = {
-        {INPUT_Q, tensor_args.input_tensor_q.mesh_tensor()},
-        {Q, std::get<0>(output).mesh_tensor()},
-        {K, std::get<1>(output).mesh_tensor()},
-        {V, std::get<2>(output).mesh_tensor()},
-    };
-    if (tensor_args.input_tensor_kv.has_value()) {
-        params.tensor_args.emplace(INPUT_KV, tensor_args.input_tensor_kv->mesh_tensor());
-    }
+    params.tensor_args = build_qkv_tensor_run_args(tensor_args, tensor_return_value);
     return params;
 }
 
