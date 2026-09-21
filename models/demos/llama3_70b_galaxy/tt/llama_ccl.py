@@ -1865,24 +1865,13 @@ def tt_distributed_rmsnorm(
 
     # Run distributed rmsnorm part 2. output_dtype lets the caller keep the norm output bf8 even when
     # the residual input is bf16 (BH no-prefetch), so downstream matmul activations stay small in L1.
-    #
-    # On the Blackhole default path (no program config) the post-norm program splits the work by tile
-    # row only, so a short prefill lands on a handful of cores that each hold a full hidden row in
-    # static dataflow buffers (about 336 KB per core for a 1280-wide row). Prefill shares L1 with the
-    # decode buffers the generator stages before the prefill warmup, and those static buffers then run
-    # into live L1 buffers ("Statically allocated dataflow buffers ... clash with L1 buffers"). The 2D
-    # grid also splits the row across cores, which cuts the per-core static footprint by the grid
-    # height. The per-element math is unchanged; only the work distribution differs.
-    post_use_2d_grid = use_2d_grid
-    if program_config is None and tt_ccl is not None and getattr(tt_ccl, "is_blackhole", False):
-        post_use_2d_grid = True
     tt_out = ttnn.rms_norm_post_all_gather(
         inp,
         tt_stats_gathered,
         epsilon=epsilon,
         weight=gamma,
         compute_kernel_config=compute_kernel_config,
-        use_2d_core_grid=post_use_2d_grid,
+        use_2d_core_grid=use_2d_grid,
         program_config=program_config,
         dtype=output_dtype,
     )

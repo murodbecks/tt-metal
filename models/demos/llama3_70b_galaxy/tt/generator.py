@@ -1683,8 +1683,23 @@ class Generator(WarmupForwardMixin):
             # uses the default interleaved inputs with the same page-table shape.
             input_layouts.append((True, True))
         self._log_l1_probe("before decode preparation")
+        headroom = None
+        if getattr(self.model_args, "use_unfused_ccl", False):
+            num_banks = ttnn.get_memory_view(self.mesh_device, ttnn.BufferType.L1).num_banks
+            tiles = ((128 * 1024) // 2048) * num_banks
+            headroom = ttnn.allocate_tensor_on_device(
+                ttnn.Shape([1, 1, 32, 32 * tiles]),
+                ttnn.bfloat16,
+                ttnn.TILE_LAYOUT,
+                self.mesh_device,
+                ttnn.L1_MEMORY_CONFIG,
+            )
+            self._log_l1_probe(f"after reserving headroom (num_banks={num_banks})")
         self.model.switch_mode("decode")
         self._log_l1_probe("after switch_mode(decode)")
+        if headroom is not None:
+            ttnn.deallocate(headroom)
+            self._log_l1_probe("after releasing headroom")
         logger.info("Preparing decode before prefill trace capture")
         for is_cur_pos_sharded, is_page_table_sharded in input_layouts:
             key = self._decode_preparation_key(page_table, on_device_logits, is_cur_pos_sharded, is_page_table_sharded)
