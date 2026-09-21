@@ -1664,6 +1664,37 @@ class Generator(WarmupForwardMixin):
             None if page_table is None else tuple(page_table.shape),
         )
 
+    def _reserve_decode_staging_headroom(self):
+        """Reserve L1 at the top of every bank while the decode global circular buffer is created.
+
+        On the Blackhole prefetcher path decode staging runs while the prefetcher's global circular
+        buffer (656 * 1088 B) holds the top of L1. The L1 allocator hands out addresses top-down, so
+        the persistent buffers the decode compile creates (about 84 KB per bank) land beneath the CB
+        and stay there after the CB is released for prefill. That leaves the lowest live L1 buffer
+        about 340 KB above the L1 base for the rest of the run, and every prefill program whose static
+        circular buffers need more than that fails with "Statically allocated ... buffers clash with
+        L1 buffers" (the layer-0 distributed norm, then the batched QKV matmul).
+
+        Holding a 128 KB block per bank while the CB is created pushes the CB down by that much;
+        releasing the block once the CB exists leaves a hole above the CB that the staging buffers
+        fill. They end up above the CB's range, so the CB's later rebuilds land at the same address
+        and prefill keeps the whole region below the residents. Decode keeps the same L1 below the
+        CB as before, since the residents used to sit there anyway.
+        """
+        if not getattr(self.model_args, "use_unfused_ccl", False):
+            return None
+        headroom_bytes_per_bank = 128 * 1024
+        tile_bytes = 32 * 32 * 2
+        num_banks = ttnn.get_memory_view(self.mesh_device, ttnn.BufferType.L1).num_banks
+        tiles = (headroom_bytes_per_bank // tile_bytes) * num_banks
+        return ttnn.allocate_tensor_on_device(
+            ttnn.Shape([1, 1, 32, 32 * tiles]),
+            ttnn.bfloat16,
+            ttnn.TILE_LAYOUT,
+            self.mesh_device,
+            ttnn.L1_MEMORY_CONFIG,
+        )
+
     def _prepare_decode_before_prefill(self, page_table, kv_cache, on_device_logits):
         """Stage the initial decode programs and inputs before prefill traces exist."""
         if any(self.trace_id_prefill.values()) or any(self.trace_ids_decode.values()):
@@ -1680,7 +1711,12 @@ class Generator(WarmupForwardMixin):
             # Galaxy's throughput demo shards both inputs; the serving warmup
             # uses the default interleaved inputs with the same page-table shape.
             input_layouts.append((True, True))
+        headroom = self._reserve_decode_staging_headroom()
         self.model.switch_mode("decode")
+        if headroom is not None:
+            # The global circular buffer now sits below the reserved block; release the block so
+            # the buffers the decode staging creates fill that space instead of the L1 below the CB.
+            ttnn.deallocate(headroom)
         logger.info("Preparing decode before prefill trace capture")
         for is_cur_pos_sharded, is_page_table_sharded in input_layouts:
             key = self._decode_preparation_key(page_table, on_device_logits, is_cur_pos_sharded, is_page_table_sharded)
