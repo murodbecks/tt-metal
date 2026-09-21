@@ -1071,6 +1071,9 @@ bool MeshDeviceImpl::close_impl(MeshDevice* pimpl_wrapper) {
     pimpl_wrapper->lifetime_->closed.store(true);
 
     if (is_initialized()) {
+        // Redirect the physical devices to the parent only once the close is committed. Doing this
+        // before the command-queue validation above left a rejected close with devices pointing at
+        // the parent while this mesh stayed open.
         // TODO #20966: Remove these calls
         for (auto* device : view_->get_devices()) {
             dynamic_cast<Device*>(device)->set_mesh_device(parent_mesh_);

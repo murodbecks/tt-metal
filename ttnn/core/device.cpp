@@ -7,6 +7,8 @@
 #include <tt_stl/assert.hpp>
 #include <tt-metalium/cluster.hpp>
 #include <tt-metalium/hal.hpp>
+#include <tt-logger/tt-logger.hpp>
+
 #include <mutex>
 
 namespace ttnn {
@@ -101,7 +103,19 @@ std::weak_ptr<MeshDevice> default_device;
 }  // namespace
 
 void SetDefaultDevice(MeshDevice* dev) {
-    auto candidate = dev != nullptr && !dev->is_closed() ? dev->weak_from_this() : std::weak_ptr<MeshDevice>{};
+    std::weak_ptr<MeshDevice> candidate;
+    if (dev != nullptr) {
+        if (dev->is_closed()) {
+            // Silent acceptance would surface much later as "no default device" in an unrelated op.
+            log_warning(
+                tt::LogAlways,
+                "SetDefaultDevice: mesh device {} is closed or belongs to a closed mesh; clearing the default device "
+                "instead of registering it",
+                dev->id());
+        } else {
+            candidate = dev->weak_from_this();
+        }
+    }
     std::lock_guard lock(default_device_mutex);
     default_device = std::move(candidate);
 }
