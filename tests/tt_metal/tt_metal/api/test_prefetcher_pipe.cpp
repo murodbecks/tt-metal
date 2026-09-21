@@ -939,10 +939,8 @@ TEST_F(PrefetcherPipeFixture, PrefetcherPipeSpace_ConfigRejects) {
                                           c.receiver_domain = CoreRangeSet{};
                                       })),
         std::exception);
-    // DRAM-sender capacity is not carvable yet (tt-metal#55285).
-    EXPECT_THROW(
-        m2::CreatePrefetcherPipeSpace(mesh_device.get(), with([](auto& c) { c.num_dram_senders = 1; })),
-        std::exception);
+    // Worker and DRAM sender capacity may coexist; exact DRAM senders are selected later.
+    EXPECT_NO_THROW(m2::CreatePrefetcherPipeSpace(mesh_device.get(), with([](auto& c) { c.num_dram_senders = 1; })));
     EXPECT_NO_THROW(m2::CreatePrefetcherPipeSpace(mesh_device.get(), config));
 }
 
@@ -1027,10 +1025,12 @@ TEST_F(PrefetcherPipeFixture, PersistentArenaSerializesOverlappingSpacesAndReuse
     auto mesh_device = devices_[0];
     uint32_t first_ring_address = 0;
     uint32_t first_config_address = 0;
+    uint64_t first_pipe_identity = 0;
     {
         auto pipe0 = make_pipe(mesh_device.get(), CoreCoord(0, 0), CoreRangeSet(CoreRange({1, 0})), 1024);
         first_ring_address = pipe0.buffer_address();
         first_config_address = pipe0.config_address();
+        first_pipe_identity = pipe0.identity();
 
         // A second space sharing (1,0) cannot alias the first one's L1 there.
         auto pipe1 = make_pipe(mesh_device.get(), CoreCoord(2, 0), CoreRangeSet(CoreRange({1, 0})), 1024);
@@ -1040,6 +1040,7 @@ TEST_F(PrefetcherPipeFixture, PersistentArenaSerializesOverlappingSpacesAndReuse
     auto replacement = make_pipe(mesh_device.get(), CoreCoord(0, 0), CoreRangeSet(CoreRange({1, 0})), 1024);
     EXPECT_EQ(replacement.buffer_address(), first_ring_address);
     EXPECT_EQ(replacement.config_address(), first_config_address);
+    EXPECT_NE(replacement.identity(), first_pipe_identity);
 }
 
 // ============================================================================
