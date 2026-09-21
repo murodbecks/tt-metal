@@ -24,7 +24,7 @@ def _probe_l1(mesh_device, tag):
         f"[L1 probe] {tag}: allocated_per_bank={mv.total_bytes_allocated_per_bank} "
         f"free_per_bank={mv.total_bytes_free_per_bank} largest_free={mv.largest_contiguous_bytes_free_per_bank}"
     )
-    key = tag.split(" (")[0]
+    key = tag.split(" (")[0] + ("|big" if mv.total_bytes_allocated_per_bank > 600000 else "")
     if key in _PROBE_DUMPED:
         return
     _PROBE_DUMPED.add(key)

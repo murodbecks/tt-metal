@@ -1070,6 +1070,12 @@ class TtLlamaAttention(LightweightModule):
         if seq_len > 2048:
             x_11SH = ttnn.reshape(x_11SH, [1, seq_len // 2048, 2048, -1])
 
+        from models.demos.llama3_70b_galaxy.tt.llama_decoder import _probe_l1
+
+        _probe_l1(
+            self.mesh_device,
+            f"attention forward_prefill before QKV linear (seq={seq_len}, batch={batch_size}, x={x_11SH.memory_config().buffer_type}, x_dtype={x_11SH.dtype})",
+        )
         if self.use_prefetcher:
             xqkv = ttnn.linear(
                 x_11SH,
