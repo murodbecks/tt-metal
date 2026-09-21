@@ -681,6 +681,7 @@
 
 - name: Llama 3.3-70B unit tests (Galaxy)
   cmd: |
+    unset TT_METAL_WATCHER
     export HF_MODEL=meta-llama/Llama-3.3-70B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/meta-llama/Llama-3.3-70B-Instruct
     # Fail fast (runner-health) if the system mesh degraded below 32 chips: otherwise the mesh_device
     # fixture skips every test and the job reports a false-green with no HF/device path exercised.
