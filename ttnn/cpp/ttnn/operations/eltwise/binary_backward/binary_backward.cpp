@@ -15,6 +15,8 @@
 #include "ttnn/operations/eltwise/binary/binary_composite.hpp"
 #include "ttnn/operations/eltwise/unary_backward/unary_backward.hpp"
 #include "ttnn/operations/eltwise/binary_backward/binary_backward.hpp"
+#include "ttnn/operations/eltwise/binary_backward/device/binary_backward_device_operation.hpp"
+#include "ttnn/operations/eltwise/binary_backward/device/binary_backward_op_types.hpp"
 #include "ttnn/operations/eltwise/complex_unary/complex_unary.hpp"
 #include "ttnn/common/constants.hpp"
 #include "ttnn/operations/eltwise/ternary/ternary.hpp"
@@ -833,6 +835,37 @@ std::vector<std::optional<Tensor>> mul_bw(
     const std::optional<MemoryConfig>& output_mem_config,
     std::optional<Tensor> input_grad,
     std::optional<Tensor> other_grad) {
+    // Route the both-grads path through the shared binary_backward device op; partial-mask
+    // requests, sharded operands, or a sharded output request stay on the composite (the
+    // device op is interleaved-only and its writer requires both grads). logical_shape
+    // equality is required in addition to padded_shape because TILE padding can equalise
+    // padded_shape when the tensor still has broadcast semantics (e.g. (1,1,32,128) vs
+    // (1,1,1,128) both pad to (1,1,32,128)), and the device op walks tile-for-tile.
+    const auto out_mem_config = output_mem_config.value_or(input_tensor_arg.memory_config());
+    const bool same_shape_no_bcast = grad_tensor_arg.logical_shape() == input_tensor_arg.logical_shape() &&
+                                     input_tensor_arg.logical_shape() == other_tensor_arg.logical_shape() &&
+                                     grad_tensor_arg.padded_shape() == input_tensor_arg.padded_shape() &&
+                                     input_tensor_arg.padded_shape() == other_tensor_arg.padded_shape();
+    const bool routable = are_required_outputs.at(0) && are_required_outputs.at(1) &&
+                          grad_tensor_arg.layout() == tt::tt_metal::Layout::TILE &&
+                          input_tensor_arg.layout() == tt::tt_metal::Layout::TILE &&
+                          other_tensor_arg.layout() == tt::tt_metal::Layout::TILE && !grad_tensor_arg.is_sharded() &&
+                          !input_tensor_arg.is_sharded() && !other_tensor_arg.is_sharded() &&
+                          !out_mem_config.is_sharded() && same_shape_no_bcast;
+    if (routable) {
+        auto outs = operations::binary_backward::launch_binary_backward(
+            operations::binary_backward::BinaryBackwardOpType::MUL_BW,
+            grad_tensor_arg,
+            input_tensor_arg,
+            other_tensor_arg,
+            tt::tt_metal::DataType::INVALID,
+            out_mem_config,
+            {true, true},
+            input_grad,
+            other_grad);
+        return {outs[0], outs[1]};
+    }
+
     std::vector<std::optional<Tensor>> result = {std::nullopt, std::nullopt};
     operations::binary_backward::detail::preallocated_tensors_check(
         input_grad,
