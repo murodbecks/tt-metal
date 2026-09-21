@@ -58,6 +58,7 @@ def run_reduce_op(device, op, shape, dim, dtype=ttnn.bfloat16, memory_config=ttn
 # =============================================================================
 
 
+@pytest.mark.merge_gate
 def test_reduce_cache_reuse_same_config(device, isolate_program_cache):
     """Same op, same shape, same dtype run twice -> 1 cache entry, different outputs."""
     shape = [1, 1, 64, 64]
@@ -95,6 +96,7 @@ def test_reduce_cache_reuse_same_config(device, isolate_program_cache):
 # =============================================================================
 
 
+@pytest.mark.merge_gate
 def test_reduce_cache_miss_different_math_ops(device, isolate_program_cache):
     """Different reduce math ops (sum vs max) -> different cache entries."""
     torch.manual_seed(0)
@@ -125,6 +127,7 @@ def test_reduce_cache_miss_different_math_ops(device, isolate_program_cache):
     assert device.cache_entries_counter.total == 2
 
 
+@pytest.mark.merge_gate
 def test_reduce_cache_miss_different_dims(device, isolate_program_cache):
     """Different reduce dims (W vs H) -> different program factories -> different cache entries."""
     torch.manual_seed(0)
@@ -157,6 +160,7 @@ def test_reduce_cache_miss_different_dims(device, isolate_program_cache):
     assert device.cache_entries_counter.total == 2
 
 
+@pytest.mark.merge_gate
 def test_reduce_cache_miss_different_input_dtypes(device, isolate_program_cache):
     """Different input dtypes -> different cache entries."""
     torch.manual_seed(0)
@@ -187,6 +191,7 @@ def test_reduce_cache_miss_different_input_dtypes(device, isolate_program_cache)
     assert device.cache_entries_counter.total == 2
 
 
+@pytest.mark.merge_gate
 def test_reduce_cache_miss_different_memory_configs(device, isolate_program_cache):
     """Different memory configs -> different cache entries."""
     torch.manual_seed(0)
@@ -223,6 +228,7 @@ def test_reduce_cache_miss_different_memory_configs(device, isolate_program_cach
     assert device.cache_entries_counter.total == 2
 
 
+@pytest.mark.merge_gate
 def test_reduce_cache_miss_different_shapes(device, isolate_program_cache):
     """Different padded shapes -> different cache entries.
     padded_shape is included in compute_program_hash() because Ht, Wt are compile-time args."""
@@ -253,6 +259,7 @@ def test_reduce_cache_miss_different_shapes(device, isolate_program_cache):
     assert device.cache_entries_counter.total == 2
 
 
+@pytest.mark.merge_gate
 def test_reduce_cache_miss_sub_core_grids(device, isolate_program_cache):
     """Different sub_core_grids -> different cache entries.
     sub_core_grids is in compute_program_hash() and affects work distribution (compile-time)."""
