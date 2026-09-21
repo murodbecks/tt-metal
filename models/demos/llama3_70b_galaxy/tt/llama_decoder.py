@@ -13,7 +13,7 @@ from models.demos.llama3_70b_galaxy.tt.distributed_norm import DistributedNorm
 _PROBE_DUMPED = set()
 
 
-def _probe_l1(mesh_device, tag):
+def _probe_l1(mesh_device, tag, force=False):
     import glob
     import os
 
@@ -25,7 +25,7 @@ def _probe_l1(mesh_device, tag):
         f"free_per_bank={mv.total_bytes_free_per_bank} largest_free={mv.largest_contiguous_bytes_free_per_bank}"
     )
     key = tag.split(" (")[0] + ("|big" if mv.total_bytes_allocated_per_bank > 600000 else "")
-    if key in _PROBE_DUMPED:
+    if key in _PROBE_DUMPED and not force:
         return
     _PROBE_DUMPED.add(key)
     prefix = f"probe_{len(_PROBE_DUMPED)}_"
@@ -43,7 +43,7 @@ def _probe_l1(mesh_device, tag):
                 in_l1 = True
             if in_l1:
                 out.append(line.strip())
-                if len(out) > 140:
+                if len(out) > 400:
                     break
         logger.info("[L1 probe] blocks: " + " | ".join(out))
 

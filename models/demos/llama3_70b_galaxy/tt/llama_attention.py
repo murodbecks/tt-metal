@@ -1077,14 +1077,25 @@ class TtLlamaAttention(LightweightModule):
             f"attention forward_prefill before QKV linear (seq={seq_len}, batch={batch_size}, x={x_11SH.memory_config().buffer_type}, x_dtype={x_11SH.dtype})",
         )
         if self.use_prefetcher:
-            xqkv = ttnn.linear(
-                x_11SH,
-                self.wqkv_interleaved,
-                dtype=self.ccl_dtype,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                compute_kernel_config=self.compute_kernel_config_hifi2,
-                program_config=self.model_config["XQKV_PREFILL_PROGCFG"](seq_len),
-            )
+            try:
+                xqkv = ttnn.linear(
+                    x_11SH,
+                    self.wqkv_interleaved,
+                    dtype=self.ccl_dtype,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    compute_kernel_config=self.compute_kernel_config_hifi2,
+                    program_config=self.model_config["XQKV_PREFILL_PROGCFG"](seq_len),
+                )
+            except Exception:
+                from loguru import logger
+
+                logger.info(
+                    f"[L1 probe] QKV linear failed; x memcfg={x_11SH.memory_config()} shape={x_11SH.shape} progcfg={self.model_config['XQKV_PREFILL_PROGCFG'](seq_len)}"
+                )
+                _probe_l1(
+                    self.mesh_device, f"AT CLASH after QKV linear (seq={seq_len}, batch={batch_size})", force=True
+                )
+                raise
         else:
             # No-prefetch (Blackhole) per-device QKV: column-fractured activation (K=k_local=1280)
             # @ interleaved DRAM wqkv [k_local, qkv_n_local]. The padded ring weight expects K=1536;
