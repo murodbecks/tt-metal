@@ -20,6 +20,8 @@ namespace tt::tt_metal {
 class Hal;
 
 class SimpleTraceAllocator {
+    // The fixture intentionally has a protected virtual destructor; clang-tidy diagnoses this declaration.
+    // NOLINTNEXTLINE(cppcoreguidelines-virtual-class-destructor)
     friend class SimpleTraceAllocatorFixture;
     friend class SimpleTraceAllocatorDeviceFixture;
 
