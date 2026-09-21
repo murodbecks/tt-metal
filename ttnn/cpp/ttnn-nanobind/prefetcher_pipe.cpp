@@ -82,11 +82,20 @@ void py_module_types(nb::module_& mod) {
             )doc")
         .def(
             "create_pipes",
-            [](PrefetcherPipeSpace& self,
+            [](nb::handle self_obj,
                const std::vector<std::pair<tt::tt_metal::CoreCoord, tt::tt_metal::CoreRangeSet>>& pipes) {
-                return self.create_pipes(pipes);
+                auto& self = nb::cast<PrefetcherPipeSpace&>(self_obj);
+                // Same lifetime tie as create_pipe, applied per element: nb::keep_alive<0, 1> cannot
+                // be used here because the return value is a Python list, which is not
+                // weak-referenceable, so nanobind would raise at call time.
+                nb::list out;
+                for (PrefetcherPipe& pipe : self.create_pipes(pipes)) {
+                    nb::object pipe_obj = nb::cast(std::move(pipe));
+                    nb::detail::keep_alive(pipe_obj.ptr(), self_obj.ptr());
+                    out.append(std::move(pipe_obj));
+                }
+                return out;
             },
-            nb::keep_alive<0, 1>(),
             nb::arg("pipes"),
             R"doc(
                 Carve several disjoint pipes in one call. The batch is validated as a whole before

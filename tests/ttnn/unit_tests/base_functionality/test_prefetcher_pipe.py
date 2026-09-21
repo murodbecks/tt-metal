@@ -86,6 +86,27 @@ def test_pipe_keeps_space_alive(device):
     assert pipe.all_cores().num_cores() == 2
 
 
+@pytest.mark.requires_grid_size((2, 1))
+def test_create_pipes_batch_keeps_space_alive(device):
+    # The batch form returns a list; each pipe (not the list) must hold the space, so the
+    # smallest grid exercises the binding's lifetime tie as well as the call itself.
+    space = ttnn.experimental.create_prefetcher_pipe_space(
+        device,
+        sender_cores=_cores((0, 0)),
+        receiver_domain=_cores((1, 0)),
+        ring_size=RING_SIZE,
+        max_receivers_per_pipe=1,
+    )
+    expected_addresses = (space.buffer_address(), space.config_address())
+    pipes = space.create_pipes([(_core(0, 0), _cores((1, 0)))])
+    assert len(pipes) == 1
+    del space
+    gc.collect()
+    assert (pipes[0].buffer_address(), pipes[0].config_address()) == expected_addresses
+    assert pipes[0].sender_core() == _core(0, 0)
+    assert pipes[0].all_cores().num_cores() == 2
+
+
 @pytest.mark.requires_grid_size((2, 2))
 def test_create_pipes_batch_share_addresses(device):
     # Two disjoint 1:1 pipes carved from one space in one call: (0,0)->(1,0) and (0,1)->(1,1).
