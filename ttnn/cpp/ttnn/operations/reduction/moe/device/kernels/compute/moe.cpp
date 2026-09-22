@@ -63,8 +63,7 @@ void sub_exp_block_bcast_cols_inplace() {
     }
 }
 
-static void add_block_bcast_rows_inplace(
-    uint32_t in0_dfb, uint32_t in1_dfb, uint32_t rows, uint32_t cols, bool first_call) {
+static void add_block_bcast_rows_inplace(uint32_t in0_dfb, uint32_t in1_dfb, uint32_t rows, uint32_t cols) {
     // Precondition: in0_cb and in1_cb have num_tiles produced
     // Postcondition: in0_cb has num_tiles produced
     // Postcondition: in1_cb has num_tiles consumed
@@ -73,13 +72,8 @@ static void add_block_bcast_rows_inplace(
     DataflowBuffer in1_dfb_obj(static_cast<uint16_t>(in1_dfb));
 
     const uint32_t num_tiles = rows * cols;
-    if (first_call) {
-        compute_kernel_hw_startup(in0_dfb, in1_dfb, in0_dfb);
-        bcast_init<EltwiseBinaryType::ELWADD, BroadcastType::ROW>(in0_dfb, in1_dfb);
-    } else {
-        reconfig_data_format(in0_dfb, in1_dfb);
-        add_bcast_rows_init(in0_dfb, in1_dfb);
-    }
+    reconfig_data_format(in0_dfb, in1_dfb);
+    add_bcast_rows_init(in0_dfb, in1_dfb);
     in0_dfb_obj.wait_front(static_cast<uint16_t>(num_tiles));
     in1_dfb_obj.wait_front(static_cast<uint16_t>(cols));
     for (uint32_t i = 0; i < rows; ++i) {
@@ -472,7 +466,7 @@ void kernel_main() {
         true>();
 
     // mask out all experts except the top-k
-    add_block_bcast_rows_inplace(dfb::values, dfb::topk_mask, Ht, Kt, false);
+    add_block_bcast_rows_inplace(dfb::values, dfb::topk_mask, Ht, Kt);
     eqz_block_inplace(dfb::output_ind, Ht * Kt);
 
     // softmax

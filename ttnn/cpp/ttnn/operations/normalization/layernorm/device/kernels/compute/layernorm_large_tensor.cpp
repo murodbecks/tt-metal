@@ -160,15 +160,6 @@ void kernel_main() {
         for (auto block : generic::blocks(Wt, block_size)) {
 #ifdef TILIZE_IN
             tilize_row_major_block(dfb_in_rm, dfb_in, block_size, block);
-#ifdef RMSNORM
-            // TODO(#52395): compute_kernel_hw_startup is a call-once API; this mid-kernel re-init (preserving the
-            // pre-cleanup full-init behaviour) should become a targeted DST re-arm.
-            compute_kernel_hw_startup(dfb_in_id, dfb_scaler_id, dfb_xmm2_id);
-#else
-            // TODO(#52395): compute_kernel_hw_startup is a call-once API; this mid-kernel re-init (preserving the
-            // pre-cleanup full-init behaviour) should become a targeted DST re-arm.
-            compute_kernel_hw_startup(dfb_in_id, dfb_scaler_id, dfb_ex_id);
-#endif
 #endif
             dfb_in.wait_front(static_cast<uint16_t>(block.full_block_size()));
             tile_regs_acquire();
@@ -314,16 +305,6 @@ void kernel_main() {
             // Tilize one block from dfb_in_rm → dfb_in per loop iteration (Pass 2).
             // Reader supplies this second pass of data after the variance data.
             tilize_row_major_block(dfb_in_rm, dfb_in, block_size, block);
-
-#ifdef RMSNORM
-            // TODO(#52395): compute_kernel_hw_startup is a call-once API; this mid-kernel re-init (preserving the
-            // pre-cleanup full-init behaviour) should become a targeted DST re-arm.
-            compute_kernel_hw_startup(dfb_in_id, dfb_scaler_id, dfb_xmm2_id);
-#else
-            // TODO(#52395): compute_kernel_hw_startup is a call-once API; this mid-kernel re-init (preserving the
-            // pre-cleanup full-init behaviour) should become a targeted DST re-arm.
-            compute_kernel_hw_startup(dfb_in_id, dfb_scaler_id, dfb_ex_id);
-#endif
 #endif
             tile_regs_acquire();
             dfb_in.wait_front(static_cast<uint16_t>(block.full_block_size()));

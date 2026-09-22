@@ -454,8 +454,8 @@ void kernel_main() {
     const uint32_t nearest32_K = 32;
     const uint32_t logk = 5;  // log(32)
 
-    // top-k
-    compute_kernel_hw_startup(dfb::input_values, dfb::index, dfb::input_transposed);
+    // top-k. top_k re-establishes SrcA and PACK before each use and never reads SrcB, so the
+    // boot in generate_rand_tile above is the only hardware startup this kernel needs.
     top_k<
         Ht,
         Wt,
