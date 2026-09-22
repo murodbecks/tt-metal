@@ -33,9 +33,11 @@ import datetime
 import json
 import logging
 import os
+import random
 import re
 import signal
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -358,6 +360,26 @@ def pytest_addoption(parser):
 
 _RECORD_TEST_ORDER: bool = False
 _UNIFIED_ORDER_FILE: str = "DEFAULT"
+
+# Inclusive milliseconds. Each perf variant draws its own delay so xdist
+# workers do not enter device execution together.
+_VARIANT_SLEEP_MIN_MS = 5
+_VARIANT_SLEEP_MAX_MS = 50
+
+
+def _pace_perf_variant(item) -> None:
+    """Random 5–50 ms pause before a perf variant.
+
+    One pytest item is one variant. The sleep sits in front of it, on the
+    worker that will run it, and stays out of the on-device measurement.
+    """
+    if TestConfig.BUILD_MODE == BuildMode.PRODUCE:
+        return
+    if item.get_closest_marker("perf") is None:
+        return
+    delay_ms = random.randint(_VARIANT_SLEEP_MIN_MS, _VARIANT_SLEEP_MAX_MS)
+    logger.debug("Pacing {} ms before {}", delay_ms, item.nodeid)
+    time.sleep(delay_ms / 1000.0)
 
 
 def pytest_configure(config):
@@ -877,6 +899,10 @@ def pytest_runtest_teardown(item, nextitem):
 def pytest_runtest_setup(item):
     """Start the server on the first test, or restart between tests if requested."""
     global _exalens_server, _reset_simulator_pending
+
+    # Silicon never starts ExalensServer, and this hook returns immediately in
+    # that case. Pace before that return so the sleep still runs on device.
+    _pace_perf_variant(item)
 
     if _exalens_server is None:
         return
