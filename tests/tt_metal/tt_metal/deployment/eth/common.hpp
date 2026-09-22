@@ -2,8 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef _ETH_COMMON_HPP
-#define _ETH_COMMON_HPP
+#ifndef ETH_COMMON_HPP
+#define ETH_COMMON_HPP
 
 #include <algorithm>
 #include <chrono>
@@ -726,7 +726,7 @@ static bool tensix_compare_dram_banks(
 static bool test_check_cores(std::span<struct core_setup> cores) {
     bool pass = true;
 
-    std::string prev = "";
+    std::string prev;
     for (const auto& cs : cores) {
         if (prev != cs.locinfo) {
             log_info(tt::LogTest, "core_check: {}", cs.locinfo);
@@ -936,4 +936,4 @@ static bool ensure_links(std::span<std::shared_ptr<distributed::MeshDevice>> dev
 
 }  // namespace tt::tt_metal
 
-#endif /* _ETH_COMMON_HPP */
+#endif /* ETH_COMMON_HPP */
