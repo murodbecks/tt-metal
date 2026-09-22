@@ -100,6 +100,7 @@ set(TT_METAL_PUBLIC_API
     api/tt-metalium/experimental/sockets/h2d_socket.hpp
     api/tt-metalium/experimental/sockets/mesh_socket.hpp
     api/tt-metalium/experimental/sockets/internal/host_d2h_leg.hpp
+    api/tt-metalium/experimental/sockets/internal/host_h2d_leg.hpp
     api/tt-metalium/experimental/sockets/internal/host_l1_map.hpp
     api/tt-metalium/experimental/sockets/internal/host_region.hpp
     api/tt-metalium/experimental/sockets/internal/host_ring_alias.hpp
