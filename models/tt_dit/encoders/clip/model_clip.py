@@ -585,7 +585,9 @@ class TextEmbeddings(Module):
 
         input_embeddings = ttnn.embedding(prompt, self.token_embedding.data, layout=ttnn.TILE_LAYOUT)
 
-        position_ids = tensor.arange(0, seq_len, dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=self.mesh_device)
+        position_ids = ttnn.typecast(
+            tensor.arange(0, seq_len, dtype=ttnn.int32, layout=ttnn.TILE_LAYOUT, device=self.mesh_device), ttnn.uint32
+        )
         position_ids = ttnn.unsqueeze(position_ids, 0)  # shape: (1, seq_len)
         position_embeddings = ttnn.embedding(position_ids, self.position_embedding.data, layout=ttnn.TILE_LAYOUT)
 
