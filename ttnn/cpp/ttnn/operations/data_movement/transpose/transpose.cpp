@@ -12,6 +12,8 @@
 #include "ttnn/operations/data_movement/permute/device/permute_device_operation.hpp"
 #include "ttnn/operations/data_movement/permute/permute.hpp"
 
+#include <tt-metalium/experimental/per_core_allocation/memory_config.hpp>
+#include <tt-metalium/experimental/range_lockstep_allocation/memory_config.hpp>
 #include <tt-metalium/hal.hpp>
 
 namespace ttnn::operations::data_movement::transpose {
@@ -28,6 +30,11 @@ inline Tensor transpose_(
     const std::optional<MemoryConfig>& output_mem_config,
     float pad_value = 0.0f) {
     MemoryConfig output_mem_constructed;
+    // Tracks whether output_mem_constructed ends up as the caller's output_mem_config verbatim
+    // (already expressed in the output coordinate frame) vs. defaulted/mirrored from the input
+    // (still needs reindexing to the output frame downstream). Forwarded to the device op so
+    // derive_effective_output_memory_config() doesn't have to guess from ND provenance alone.
+    bool output_mem_config_is_explicit = false;
     if (!output_mem_config.has_value() ||
         (output_mem_config.value().is_sharded() && !output_mem_config.value().shard_spec().has_value())) {
         // Native sharded subset: derive output shard_spec from input's. Otherwise fall back to L1
@@ -38,6 +45,7 @@ inline Tensor transpose_(
             // inherit input config so downstream can promote (e.g. N=C=1 → WIDTH_SHARDED).
             const bool user_requested_layout = output_mem_config.has_value() && output_mem_config.value().is_sharded();
             output_mem_constructed = user_requested_layout ? output_mem_config.value() : a.memory_config();
+            output_mem_config_is_explicit = user_requested_layout;
             // If shard geometry can't scale to a valid output shard, hand back a shard-spec-less
             // sharded MemoryConfig (device op synthesizes via generate_transpose_shard_spec) when
             // the user requested sharded; otherwise fall back to L1 interleaved.
@@ -107,6 +115,7 @@ inline Tensor transpose_(
             // User-requested sharded output (no spec): honor the layout; device op will synthesize
             // the spec. Must precede the non-native fallback below so it isn't overridden.
             output_mem_constructed = output_mem_config.value();
+            output_mem_config_is_explicit = true;
         } else if (a.is_sharded()) {
             // Non-native sharded input → mirror input's memory_layout (no shard_spec, device op
             // synthesizes via adjust_shard_spec_to_shape / generate_transpose_shard_spec). Preserve
@@ -117,11 +126,19 @@ inline Tensor transpose_(
                 input_memory_config.created_with_nd_shard_spec()
                     ? MemoryConfig(input_memory_config.buffer_type(), input_memory_config.nd_shard_spec())
                     : MemoryConfig(input_memory_config.memory_layout(), input_memory_config.buffer_type());
+            // Both branches above use public MemoryConfig constructors, which always reset
+            // experimental per-core-allocation / range-lockstep-allocation state to defaults —
+            // reapply them from the input so a caller's allocation mode survives the fallback.
+            per_core_allocation::set_per_core_allocation(
+                output_mem_constructed, per_core_allocation::is_per_core_allocation(input_memory_config));
+            range_lockstep_allocation::set_range_lockstep_allocation(
+                output_mem_constructed, range_lockstep_allocation::is_range_lockstep_allocation(input_memory_config));
         } else {
             output_mem_constructed = a.memory_config();
         }
     } else {
         output_mem_constructed = output_mem_config.value();
+        output_mem_config_is_explicit = true;
     }
 
     auto prim_permute = [&](const ttnn::Tensor& input, const ttsl::SmallVector<uint32_t>& dims) -> ttnn::Tensor {
@@ -172,7 +189,7 @@ inline Tensor transpose_(
             break;
         default: break;
     }
-    return ttnn::prim::transpose(a, transpose_dim, output_mem_constructed, pad_value);
+    return ttnn::prim::transpose(a, transpose_dim, output_mem_constructed, pad_value, output_mem_config_is_explicit);
 }
 
 ttnn::Tensor transpose_nd(

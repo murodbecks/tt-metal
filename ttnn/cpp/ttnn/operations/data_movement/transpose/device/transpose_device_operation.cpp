@@ -7,6 +7,8 @@
 #include "ttnn/tensor/tensor_ops.hpp"
 
 #include <tt-metalium/constants.hpp>
+#include <tt-metalium/experimental/per_core_allocation/memory_config.hpp>
+#include <tt-metalium/experimental/range_lockstep_allocation/memory_config.hpp>
 #include <tt-metalium/hal.hpp>
 
 using namespace tt::constants;
@@ -63,31 +65,66 @@ TransposedShapes transposed_shapes(const Tensor& input_tensor, TransposeOpDim di
 // contract is asymmetric (dim[1] = logical H, dim[2] = round_up(logical C, TILE_HEIGHT)) rather
 // than a plain swap, so a raw shard-extent swap wouldn't be sound there; callers must fall back to
 // fresh synthesis (see nd_shard_spec_from_legacy) for that case.
+//
+// NdShardSpec::shard_shape is trailing-aligned to the *tensor's* rank, not a standalone shape —
+// see squeeze_shape_ranks(): shard_shape[-1] is always the tensor's last dim, shard_shape[-N] its
+// N-th-from-last dim, for shard_shape of rank N. Any leading tensor dims not covered by
+// shard_shape simply aren't sharded (full tensor extent along that axis). tensor_rank is needed to
+// translate the transpose's absolute tensor-axis pair into shard_shape indices correctly.
 std::optional<NdShardSpec> adjust_nd_shard_spec_for_transpose(
-    const NdShardSpec& nd_shard_spec, TransposeOpDim dim, Layout layout) {
+    const NdShardSpec& nd_shard_spec, TransposeOpDim dim, Layout layout, int tensor_rank) {
     auto shard_shape = nd_shard_spec.shard_shape;
-    const auto rank = static_cast<int>(shard_shape.rank());
+    const int shard_rank = static_cast<int>(shard_shape.rank());
+    const int offset = tensor_rank - shard_rank;  // shard_shape[i] <=> tensor axis (i + offset)
+
+    // Map an absolute tensor axis to its shard_shape index, or nullopt if that axis isn't
+    // represented in shard_shape at all (i.e. not sharded along that axis).
+    auto to_shard_index = [&](int tensor_axis) -> std::optional<int> {
+        int idx = tensor_axis - offset;
+        if (idx < 0 || idx >= shard_rank) {
+            return std::nullopt;
+        }
+        return idx;
+    };
+
+    std::optional<int> a;
+    std::optional<int> b;
     switch (dim) {
         case TransposeOpDim::CN:
-            if (rank < 2) {
+            if (tensor_rank < 2) {
                 return std::nullopt;
             }
-            std::swap(shard_shape[0], shard_shape[1]);
+            a = to_shard_index(0);
+            b = to_shard_index(1);
             break;
         case TransposeOpDim::WH:
-            if (rank < 2) {
+            if (tensor_rank < 2) {
                 return std::nullopt;
             }
-            std::swap(shard_shape[-2], shard_shape[-1]);
+            a = to_shard_index(tensor_rank - 2);
+            b = to_shard_index(tensor_rank - 1);
             break;
         case TransposeOpDim::HC:
-            if (layout != Layout::ROW_MAJOR || rank < 3) {
+            if (layout != Layout::ROW_MAJOR || tensor_rank < 3) {
                 return std::nullopt;
             }
-            std::swap(shard_shape[1], shard_shape[2]);
+            a = to_shard_index(1);
+            b = to_shard_index(2);
             break;
         default: return std::nullopt;
     }
+    if (a.has_value() != b.has_value()) {
+        // Exactly one of the two swapped axes is represented in shard_shape: expressing the
+        // result would require renormalizing shard_shape to the full tensor rank first (padding
+        // the missing axis back in). Bail out so the caller falls back to fresh synthesis instead
+        // of guessing.
+        return std::nullopt;
+    }
+    if (a.has_value()) {
+        std::swap(shard_shape[*a], shard_shape[*b]);
+    }
+    // Else: neither swapped axis is represented in shard_shape, so swapping their roles doesn't
+    // change shard_shape at all.
     NdShardSpec adjusted = nd_shard_spec;
     adjusted.shard_shape = std::move(shard_shape);
     return adjusted;
@@ -97,16 +134,34 @@ std::optional<NdShardSpec> adjust_nd_shard_spec_for_transpose(
 // 2-element flatten TensorSpec::populate_nd_shard_spec_from_legacy() uses internally. Used to
 // re-derive ND-sharding provenance from fresh geometry rather than reusing a stale nd_shard_spec
 // that may not describe the transposed shape.
-NdShardSpec nd_shard_spec_from_legacy(const ShardSpec& shard_spec, TensorMemoryLayout memory_layout) {
+//
+// original_strategy carries the input's shard_distribution_strategy through: inferring it solely
+// from memory_layout defaults everything but BLOCK_SHARDED to ROUND_ROBIN_1D, silently changing the
+// shard-to-bank mapping for e.g. CONTIGUOUS_1D or GRID_2D ND-only inputs that have no legacy
+// equivalent to infer from.
+NdShardSpec nd_shard_spec_from_legacy(
+    const ShardSpec& shard_spec, TensorMemoryLayout memory_layout, ShardDistributionStrategy original_strategy) {
     NdShardSpec nd_shard_spec{
         .shard_shape = ttnn::Shape({shard_spec.shape[0], shard_spec.shape[1]}),
         .grid = shard_spec.grid,
         .orientation = shard_spec.orientation,
+        .shard_distribution_strategy = original_strategy,
     };
-    if (memory_layout == TensorMemoryLayout::BLOCK_SHARDED) {
+    if (original_strategy == ShardDistributionStrategy::ROUND_ROBIN_1D &&
+        memory_layout == TensorMemoryLayout::BLOCK_SHARDED) {
         nd_shard_spec.shard_distribution_strategy = ShardDistributionStrategy::GRID_2D;
     }
     return nd_shard_spec;
+}
+
+// MemoryConfig's public constructors always reset experimental per-core-allocation /
+// range-lockstep-allocation state to defaults, so any hand-reconstruction of a MemoryConfig (to
+// swap buffer_type/shard geometry while otherwise preserving it) must re-apply them explicitly.
+void copy_experimental_allocation_flags(const MemoryConfig& source, MemoryConfig& dest) {
+    experimental::per_core_allocation::set_per_core_allocation(
+        dest, experimental::per_core_allocation::is_per_core_allocation(source));
+    experimental::range_lockstep_allocation::set_range_lockstep_allocation(
+        dest, experimental::range_lockstep_allocation::is_range_lockstep_allocation(source));
 }
 
 // Synthesize a shard_spec when the user asks for sharded output without one, so downstream
@@ -128,16 +183,39 @@ MemoryConfig derive_effective_output_memory_config(
     // downstream. Prefer reindexing the existing ND shard geometry for the specific transpose dim
     // (keeps the same shard grid/placement, just reordered) over the legacy 2D scaling below,
     // which doesn't model ND shard shapes at all.
-    const bool preserve_nd_provenance =
+    //
+    // output_mem_config_is_explicit (set by transpose.cpp) distinguishes a caller-supplied output
+    // config — already expressed in the output coordinate frame, must be honored verbatim — from
+    // one defaulted/mirrored from the input, which still needs reindexing to the output frame.
+    // Both input and a caller-supplied output can independently carry ND provenance, so the flag
+    // (not the input's provenance) is what actually determines whether reindexing is correct here.
+    const bool output_has_nd_spec =
         output_mem_config.created_with_nd_shard_spec() && output_mem_config.nd_shard_spec().has_value();
+    if (output_has_nd_spec && operation_attributes.output_mem_config_is_explicit) {
+        return output_mem_config;
+    }
+    const bool preserve_nd_provenance = output_has_nd_spec;
     if (preserve_nd_provenance) {
         if (auto adjusted_nd = adjust_nd_shard_spec_for_transpose(
-                *output_mem_config.nd_shard_spec(), operation_attributes.dim, input_tensor.layout())) {
-            return MemoryConfig(output_mem_config.buffer_type(), std::move(adjusted_nd));
+                *output_mem_config.nd_shard_spec(),
+                operation_attributes.dim,
+                input_tensor.layout(),
+                static_cast<int>(input_tensor.padded_shape().rank()))) {
+            auto adjusted_config = MemoryConfig(output_mem_config.buffer_type(), std::move(adjusted_nd));
+            copy_experimental_allocation_flags(output_mem_config, adjusted_config);
+            return adjusted_config;
         }
         // Fall through (e.g. TILE HC): can't reindex losslessly, so synthesize fresh legacy shard
         // geometry below and re-wrap it as an NdShardSpec instead of dropping provenance outright.
     }
+    // output_mem_config.memory_layout() always reports ND_SHARDED for an ND-only config, losing
+    // the actual HEIGHT/WIDTH/BLOCK distribution style the input was created with — which
+    // generate_transpose_shard_spec()/nd_shard_spec_from_legacy() need to synthesize a matching
+    // geometry instead of silently defaulting to BLOCK_SHARDED. The input's own memory_config()
+    // already carries that legacy-equivalent layout (derived at tensor-construction time by
+    // TensorSpec::populate_sharding_specs()) when the ND shape was flattenable, so prefer it here.
+    const TensorMemoryLayout synthesis_memory_layout =
+        preserve_nd_provenance ? input_tensor.memory_config().memory_layout() : output_mem_config.memory_layout();
 
     // adjust_shard_spec_to_shape preserves the sharding style — only reuse input geometry when
     // requested output layout matches input's; otherwise generate_transpose_shard_spec builds
@@ -155,18 +233,26 @@ MemoryConfig derive_effective_output_memory_config(
             const bool tile_aligned = adjusted->shape[0] % tt::constants::TILE_HEIGHT == 0 &&
                                       adjusted->shape[1] % tt::constants::TILE_WIDTH == 0;
             if (!tile_layout || tile_aligned) {
-                return MemoryConfig(
+                auto adjusted_config = MemoryConfig(
                     output_mem_config.memory_layout(), output_mem_config.buffer_type(), std::move(adjusted));
+                copy_experimental_allocation_flags(output_mem_config, adjusted_config);
+                return adjusted_config;
             }
         }
     }
-    auto shard_spec =
-        generate_transpose_shard_spec(input_tensor, output_padded_shape, output_mem_config.memory_layout());
+    auto shard_spec = generate_transpose_shard_spec(input_tensor, output_padded_shape, synthesis_memory_layout);
     if (preserve_nd_provenance) {
-        return MemoryConfig(
-            output_mem_config.buffer_type(), nd_shard_spec_from_legacy(shard_spec, output_mem_config.memory_layout()));
+        const auto original_strategy = output_mem_config.nd_shard_spec()->shard_distribution_strategy;
+        auto rewrapped_config = MemoryConfig(
+            output_mem_config.buffer_type(),
+            nd_shard_spec_from_legacy(shard_spec, synthesis_memory_layout, original_strategy));
+        copy_experimental_allocation_flags(output_mem_config, rewrapped_config);
+        return rewrapped_config;
     }
-    return MemoryConfig(output_mem_config.memory_layout(), output_mem_config.buffer_type(), shard_spec);
+    auto synthesized_config =
+        MemoryConfig(output_mem_config.memory_layout(), output_mem_config.buffer_type(), shard_spec);
+    copy_experimental_allocation_flags(output_mem_config, synthesized_config);
+    return synthesized_config;
 }
 
 }  // namespace
@@ -320,13 +406,15 @@ ttnn::Tensor transpose(
     const Tensor& input_tensor,
     ttnn::prim::TransposeOpDim dim,
     const tt::tt_metal::MemoryConfig& output_mem_config,
-    float pad_value) {
+    float pad_value,
+    bool output_mem_config_is_explicit) {
     using OperationType = ttnn::prim::TransposeDeviceOperation;
     return ttnn::device_operation::launch<OperationType>(
         OperationType::operation_attributes_t{
             .dim = dim,
             .output_mem_config = output_mem_config,
             .pad_value = pad_value,
+            .output_mem_config_is_explicit = output_mem_config_is_explicit,
         },
         TransposeInputs{
             .input = input_tensor,
