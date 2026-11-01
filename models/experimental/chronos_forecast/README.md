@@ -179,6 +179,78 @@ Blackhole Galaxy bring-up:
   `sweeps/sweep_l1_chunk.py`.
 
 
+## Univariate fast path (`tt/univariate`)
+
+`TtChronosUnivariate` is a second implementation for the most common call: independent univariate
+series, each its own group (no cross-series group attention, no covariates). It loads the same
+checkpoint and returns the same `(B, Q, H)` quantile tensor as `TtChronos.forward`, and is tuned
+for latency at batch <= 4 and throughput at large batch, on one card or data parallel over a 1xN mesh.
+Use `TtChronos` for `group_ids`, covariates or contexts longer than 512.
+
+```python
+import ttnn
+from models.experimental.chronos_forecast.tt.univariate import DEVICE_OPTIONS, TtChronosUnivariate
+
+mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 4), **DEVICE_OPTIONS)  # or MeshShape(1, 1)
+model = TtChronosUnivariate.from_pretrained(mesh, "models/experimental/chronos_forecast/weights/chronos-2",
+                                            precision="bfp8_b")  # or "bf16"
+quantiles = model(context, num_output_patches=4)  # context (B, T) float, NaN = missing -> (B, 21, 64)
+```
+
+What it does differently:
+
+- **Group attention folded away.** With one series per group each query sees only itself, so the
+  sublayer is exactly `x + W_o W_v RMSNorm(x)`; the two linears are folded on the host into one.
+- **Batch folded into M** for every matmul, activations block-sharded in L1, and per-shape program
+  configs (1D/2D multicast, wide K blocks) for the large path; batch <= 4 keeps a separate
+  latency graph.
+- **Token packing.** At large batch up to six 37-token series share one padded sequence (block-diagonal
+  SDPA mask), so padding to the tile size costs far less.
+- **Fused split-heads + RoPE** kernel (`tt/univariate/kernels`) on the large path.
+- **Execution.** One metal trace per graph key with persistent inputs; multi-pass calls stream
+  through two command queues and overlap host prep / readback with the replay.
+- **Precision.** `bf16`: bf16 weights and activations, fp32 accumulation, HiFi4 except HiFi2 for the
+  large-path attention output, FF and SDPA. `bfp8_b`: bfp8_b weights, HiFi2 matmuls, with LoFi for the folded
+  group-attention linear and the FF down projection on the large path only.
+
+Measured with `tests/perf/test_univariate_perf.py` on Blackhole p150 (context 512, horizon 64,
+host arrays in, host forecasts out, steady state):
+
+| chips | precision | b1 | b4 | b64 | b256 | b1024 | b4096 |
+|---|---|---|---|---|---|---|---|
+| 1 | bf16 | 438/s, p50 2.29 ms | 1,168/s, 3.42 ms | 7,403/s | 8,314/s | 9,826/s | |
+| 1 | bfp8_b | 485/s, p50 2.06 ms | 1,215/s, 3.29 ms | 7,870/s | 9,633/s | 11,736/s | |
+| 4 | bf16 | | | 11,407/s | | 29,975/s | 35,591/s |
+| 4 | bfp8_b | | | 11,950/s | | 32,738/s | 38,733/s |
+
+Accuracy against the reference model (`tests/test_univariate.py`): max per-row quantile NRMSE
+<= 0.021 at both precisions for batch 1 to 1,024 on one and four chips (gate 0.04), including
+missing values, short histories and constant series; traced repeats are bit-identical.
+
+Same host, end-to-end timing of both implementations at context 512 / horizon 64 (`TtChronos` with
+its performance preset at bfp8_b and default preset at bf16, trace runner):
+
+| | `TtChronos` | `TtChronosUnivariate` |
+|---|---|---|
+| p50 latency, batch <= 4, bfp8_b | 6.2 ms | 2.0 ms |
+| 1 chip, b1024, bfp8_b / bf16 | 10,929-11,200 / 7,470-7,490 series/s | 11,877-12,048 / 9,964-10,066 series/s |
+| 4 chips, b1024, bfp8_b / bf16 | 22,064 / 17,887 series/s | 33,762 / 29,997 series/s |
+| 4 chips, b4096, bf16 | 22,496 series/s | 36,125 series/s |
+| max row NRMSE vs FP32 reference, bfp8_b | 0.032 (0.040 on 4 chips) | 0.025 (0.036 on 4 chips) |
+| device memory, bfp8_b | 141 MB | 111 MB |
+
+Known limits: contexts up to 512 and horizons up to 64 are validated (longer contexts run but are
+untested); one sample with extreme values (arcsinh stress) exceeds 0.04 NRMSE at batch 1; tested on
+Blackhole p150 only. At bfp8_b, `TtChronos` uses about 5-10% less energy per series at b256 and b1024
+on one chip (LoFi in every FF and attention matmul).
+
+```bash
+# accuracy, 1 chip and 1x4 mesh (needs weights/chronos-2)
+pytest models/experimental/chronos_forecast/tests/test_univariate.py
+# timing tables above
+pytest -s models/experimental/chronos_forecast/tests/perf/test_univariate_perf.py
+```
+
 ## Running the tests
 
 Install the requirements from [Setup](#setup) first; without them the tests
