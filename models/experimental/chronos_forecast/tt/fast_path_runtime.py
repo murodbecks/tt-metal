@@ -13,7 +13,7 @@ import torch
 
 import ttnn
 
-from . import ops as _ops
+from models.experimental.chronos_forecast.tt import fast_path_ops as _ops
 
 TILE, NEG_INF = _ops.TILE, _ops.NEG_INF
 _round_up, _pad_rows, _choose_pack = _ops._round_up, _ops._pad_rows, _ops._choose_pack

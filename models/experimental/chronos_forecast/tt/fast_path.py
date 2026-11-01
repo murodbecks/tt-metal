@@ -1,28 +1,28 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
-"""Univariate fast path for Chronos-2: every series is its own group (no group attention across
-series, no covariates), the common forecasting call. Same checkpoint and numerics contract as
-TtChronos, tuned for throughput at large batch and latency at batch <= 4, on one card or a 1xN
-mesh (data parallel).
+"""Fast path behind ``TtChronos.forward`` for independent univariate series (each series its own
+group, no covariates), the common forecasting call. ``TtChronos`` routes a call here when
+``supports`` holds and runs everything else through the encoder modules. Tuned for latency at
+batch <= 4 and throughput at large batch, on one chip or data parallel over a 1xN mesh.
 
-Three modules:
-- ops.py: design notes and measurements (module docstring), constants, host prep,
-  weight folding, the fused split + RoPE op and the precision presets (re-exported here);
-- runtime.py: TracedRunner, the execution mixin (eager / traced passes, 2-CQ
+- fast_path_ops.py: design notes and measurements (module docstring), constants, host prep,
+  weight folding and the precision presets;
+- fast_path_runtime.py: TracedRunner, the execution mixin (eager / traced passes, 2-CQ
   streaming, pass sizing, token packing, host-device pipeline);
-- model.py (this file): Chronos2TTBackend, the device graph, and TtChronosUnivariate, the
-  public API.
+- fast_path.py (this file): the device graph and TtChronosFastPath;
+- ops/split_rope: the fused split-heads + RoPE op of the large-batch path.
 
-Row-major feature upload (ops.py docstring) is on by default only on a multi-card
+Row-major feature upload (fast_path_ops docstring) is on by default only on a multi-chip
 mesh (CHRONOS2_RM_UPLOAD=auto): there the host tilize bounds the packed passes, +16% / +30%
-items/s at b1024 / b4096 on 1x4 in bf16 (bfp8_b +19% / +28%),
-while one card is device-bound and measured -2.5% (bf16) / -0.8% (bfp8_b) mean items/s at
-b1024 with the extra on-device tilize. CHRONOS2_RM_UPLOAD=1 forces it on, 0 off.
+items/s at b1024 / b4096 on 1x4 in bf16 (bfp8_b +19% / +28%), while one chip is device-bound
+and measured -2.5% (bf16) / -0.8% (bfp8_b) mean items/s at b1024 with the extra on-device
+tilize. CHRONOS2_RM_UPLOAD=1 forces it on, 0 off.
 
 FF intermediate in bfp8_b (bfp8_b preset, sharded B>4 path only): the ff_up output (relu
 fused) that feeds ff_down is written in bfp8_b instead of bf16, halving the L1 bytes of the
-widest activation (3072 columns); profile showed LoFi ff_down at 22.6% FPU, slower
-than HiFi2 ff_up. Off by default (it did not lower J/item measurably); CHRONOS2_LARGE_FF_BF8=1 enables it; bf16 mode and B<=4 are unchanged.
+widest activation (3072 columns); the profile showed LoFi ff_down at 22.6% FPU, slower than
+HiFi2 ff_up. Off by default (it did not lower J/item measurably); CHRONOS2_LARGE_FF_BF8=1
+enables it; bf16 mode and B<=4 are unchanged.
 """
 from __future__ import annotations
 
@@ -32,11 +32,11 @@ import numpy as np
 
 import ttnn
 
-from . import ops as _ops
+from models.experimental.chronos_forecast.ops.split_rope import split_rope
+from models.experimental.chronos_forecast.tt import fast_path_ops as _ops
+from models.experimental.chronos_forecast.tt.fast_path_runtime import TracedRunner
 
-from .runtime import TracedRunner  # noqa: E402
-
-# the shared names (constants, host prep, folds, split_rope, presets) used by the graph below
+# the shared names (constants, host prep, folds, presets) used by the graph below
 globals().update({k: v for k, v in vars(_ops).items() if not k.startswith("__")})
 
 
@@ -820,35 +820,38 @@ class Chronos2TTBackend(TracedRunner):
         return {"quantiles": self._postprocess(fut_rows, loc, scale, h_req)}
 
 
-class TtChronosUnivariate(Chronos2TTBackend):
-    """Chronos-2 univariate forecaster on a MeshDevice (1x1 on one card, 1xN data parallel).
+# Envelope the fast path is validated on; longer contexts / horizons take the encoder path.
+MAX_CONTEXT = 512
+MAX_OUTPUT_PATCHES = 4
 
-    precision: "bf16" (default) or "bfp8_b" (bfp8_b weights, LoFi wg / ff_down on the large
-    path). Open the device with DEVICE_OPTIONS (two command queues, 32 MiB trace region) for the
-    traced 2-CQ path; without them the model still runs, eagerly or on one queue.
-    """
 
-    @classmethod
-    def from_pretrained(cls, mesh_device, checkpoint, precision="bf16"):
-        """`checkpoint`: a directory with config.json and model.safetensors (amazon/chronos-2)."""
-        return cls(str(checkpoint), None, mesh_device, precision=precision)
+def supports(config: dict) -> bool:
+    """Checkpoint geometry the fast path implements: RoPE heads of 64 (two tiles), tile-aligned
+    widths, ReLU feed-forward and equal non-overlapping input / output patches."""
+    cc = config.get("chronos_config", {})
+    return (
+        int(config.get("d_kv", 0)) == 2 * TILE
+        and int(config.get("d_model", 0)) % TILE == 0
+        and int(config.get("d_ff", 0)) % TILE == 0
+        and config.get("dense_act_fn", "relu") == "relu"
+        and cc.get("input_patch_size") == cc.get("input_patch_stride") == cc.get("output_patch_size")
+    )
 
-    @classmethod
-    def from_torch_model(cls, mesh_device, model, precision="bf16"):
-        """`model`: the reference Chronos2Model (reference/chronos2/model.py) or the HF one."""
-        return cls(model.state_dict(), model.config.to_dict(), mesh_device, precision=precision)
 
-    def forward(self, context, context_mask=None, num_output_patches=1, prediction_length=None):
-        """Quantile forecasts (B, Q, H) as a host float tensor, H = prediction_length or
-        num_output_patches * output_patch_size; same layout as TtChronos.forward. `context` is
-        (B, T) with NaN for missing values; `context_mask` (B, T) marks observed values."""
+class TtChronosFastPath(Chronos2TTBackend):
+    """Built by ``TtChronos`` from the reference model's state dict and config. precision:
+    "bf16" or "bfp8_b" (bfp8_b weights, LoFi wg / ff_down on the large path). A device opened with
+    DEVICE_OPTIONS (two command queues, 32 MiB trace region) gets the traced 2-CQ path; otherwise
+    it runs eagerly or on one queue."""
+
+    def forward(self, context, context_mask=None, num_output_patches=1):
+        """Quantile forecasts (B, Q, num_output_patches * output_patch_size), host float, the
+        ``TtChronos.forward`` layout. ``context`` (B, T) may hold NaN for missing values."""
         import torch
 
         context = torch.as_tensor(context, dtype=torch.float32)
         if context_mask is None:
             context_mask = ~torch.isnan(context)
-        horizon = prediction_length or num_output_patches * self.cfg.out_patch
+        horizon = num_output_patches * self.cfg.out_patch
         quantiles = self.forecast(context.numpy(), torch.as_tensor(context_mask).float().numpy(), horizon)
         return torch.from_numpy(np.ascontiguousarray(quantiles["quantiles"].transpose(0, 2, 1))).float()
-
-    __call__ = forward

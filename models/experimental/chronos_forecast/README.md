@@ -179,22 +179,24 @@ Blackhole Galaxy bring-up:
   `sweeps/sweep_l1_chunk.py`.
 
 
-## Univariate fast path (`tt/univariate`)
+## Fast path for univariate series
 
-`TtChronosUnivariate` is a second implementation for the most common call: independent univariate
-series, each its own group (no cross-series group attention, no covariates). It loads the same
-checkpoint and returns the same `(B, Q, H)` quantile tensor as `TtChronos.forward`, and is tuned
-for latency at batch <= 4 and throughput at large batch, on one card or data parallel over a 1xN mesh.
-Use `TtChronos` for `group_ids`, covariates or contexts longer than 512.
+`TtChronos.forward` runs a separate, faster graph (`tt/fast_path.py`) for the most common call:
+independent univariate series (no shared `group_ids`, no covariates), context up to 512 and up to 4
+output patches. Everything else (groups, covariates, longer contexts) runs through the encoder
+modules as before. The fast path also accepts missing values (NaN or `context_mask`) and runs data
+parallel when `TtChronos` is built on a 1xN mesh. Nothing changes for callers:
 
 ```python
 import ttnn
-from models.experimental.chronos_forecast.tt.univariate import DEVICE_OPTIONS, TtChronosUnivariate
+from models.experimental.chronos_forecast.tt.model import TtChronos
+from models.experimental.chronos_forecast.tt.program_configs import TtChronosPrecision
 
-mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 4), **DEVICE_OPTIONS)  # or MeshShape(1, 1)
-model = TtChronosUnivariate.from_pretrained(mesh, "models/experimental/chronos_forecast/weights/chronos-2",
-                                            precision="bfp8_b")  # or "bf16"
-quantiles = model(context, num_output_patches=4)  # context (B, T) float, NaN = missing -> (B, 21, 64)
+# two command queues and a trace region enable the traced 2-CQ path (it falls back without them)
+mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 4), trace_region_size=32 << 20, num_command_queues=2)
+model = TtChronos.from_torch_model(mesh, reference, TtChronosPrecision.performance())  # bfp8_b weights
+quantiles = model.forward(context, num_output_patches=4)  # (B, 512) -> (B, 21, 64)
+model.uses_fast_path(context, num_output_patches=4)       # True; from_torch_model(..., fast_path=False) opts out
 ```
 
 What it does differently:
@@ -206,14 +208,15 @@ What it does differently:
   latency graph.
 - **Token packing.** At large batch up to six 37-token series share one padded sequence (block-diagonal
   SDPA mask), so padding to the tile size costs far less.
-- **Fused split-heads + RoPE** kernel (`tt/univariate/kernels`) on the large path.
+- **Fused split-heads + RoPE** op (`ops/split_rope`) on the large path.
 - **Execution.** One metal trace per graph key with persistent inputs; multi-pass calls stream
   through two command queues and overlap host prep / readback with the replay.
-- **Precision.** `bf16`: bf16 weights and activations, fp32 accumulation, HiFi4 except HiFi2 for the
-  large-path attention output, FF and SDPA. `bfp8_b`: bfp8_b weights, HiFi2 matmuls, with LoFi for the folded
-  group-attention linear and the FF down projection on the large path only.
+- **Precision.** `TtChronosPrecision()` runs it in bf16: bf16 weights and activations, fp32
+  accumulation, HiFi4 except HiFi2 for the large-path attention output, FF and SDPA. A preset with
+  bf8 weights (e.g. `performance()`) runs it in bfp8_b: bfp8_b weights, HiFi2 matmuls, with LoFi for
+  the folded group-attention linear and the FF down projection on the large path only.
 
-Measured with `tests/perf/test_univariate_perf.py` on Blackhole p150 (context 512, horizon 64,
+Measured with `tests/perf/test_fast_path_perf.py` on Blackhole p150 (context 512, horizon 64,
 host arrays in, host forecasts out, steady state):
 
 | chips | precision | b1 | b4 | b64 | b256 | b1024 | b4096 |
@@ -223,14 +226,14 @@ host arrays in, host forecasts out, steady state):
 | 4 | bf16 | | | 11,407/s | | 29,975/s | 35,591/s |
 | 4 | bfp8_b | | | 11,950/s | | 32,738/s | 38,733/s |
 
-Accuracy against the reference model (`tests/test_univariate.py`): max per-row quantile NRMSE
+Accuracy against the reference model (`tests/test_fast_path.py`): max per-row quantile NRMSE
 <= 0.021 at both precisions for batch 1 to 1,024 on one and four chips (gate 0.04), including
 missing values, short histories and constant series; traced repeats are bit-identical.
 
-Same host, end-to-end timing of both implementations at context 512 / horizon 64 (`TtChronos` with
-its performance preset at bfp8_b and default preset at bf16, trace runner):
+Same host, end-to-end timing at context 512 / horizon 64 against the encoder path through the trace
+runner (`TtChronosTraceRunner`, performance preset at bfp8_b, default preset at bf16):
 
-| | `TtChronos` | `TtChronosUnivariate` |
+| | encoder path (trace runner) | fast path |
 |---|---|---|
 | p50 latency, batch <= 4, bfp8_b | 6.2 ms | 2.0 ms |
 | 1 chip, b1024, bfp8_b / bf16 | 10,929-11,200 / 7,470-7,490 series/s | 11,877-12,048 / 9,964-10,066 series/s |
@@ -239,16 +242,16 @@ its performance preset at bfp8_b and default preset at bf16, trace runner):
 | max row NRMSE vs FP32 reference, bfp8_b | 0.032 (0.040 on 4 chips) | 0.025 (0.036 on 4 chips) |
 | device memory, bfp8_b | 141 MB | 111 MB |
 
-Known limits: contexts up to 512 and horizons up to 64 are validated (longer contexts run but are
-untested); one sample with extreme values (arcsinh stress) exceeds 0.04 NRMSE at batch 1; tested on
-Blackhole p150 only. At bfp8_b, `TtChronos` uses about 5-10% less energy per series at b256 and b1024
-on one chip (LoFi in every FF and attention matmul).
+Known limits: the fast path covers contexts up to 512 and horizons up to 64, the envelope it was
+validated on; longer ones use the encoder path. One sample with extreme values (arcsinh stress)
+exceeds 0.04 NRMSE at batch 1. Tested on Blackhole p150 only. At bfp8_b the encoder path uses about
+5-10% less energy per series at b256 and b1024 on one chip (LoFi in every FF and attention matmul).
 
 ```bash
 # accuracy, 1 chip and 1x4 mesh (needs weights/chronos-2)
-pytest models/experimental/chronos_forecast/tests/test_univariate.py
+pytest models/experimental/chronos_forecast/tests/test_fast_path.py
 # timing tables above
-pytest -s models/experimental/chronos_forecast/tests/perf/test_univariate_perf.py
+pytest -s models/experimental/chronos_forecast/tests/perf/test_fast_path_perf.py
 ```
 
 ## Running the tests

@@ -10,6 +10,11 @@ reference : models/experimental/chronos_forecast/reference/chronos2/model.py
 
 v1: all-valid masks only (variable masks raise); embeddings/encoder on device, rest on host.
 
+Fast path: ``forward`` on independent univariate series (no shared group ids, no covariates,
+context <= 512, up to 4 output patches) runs tt/fast_path.py instead, on one chip or a mesh, with
+missing values allowed; ``uses_fast_path`` tells which path a call takes. Models built with
+``from_torch_model(..., fast_path=False)`` or from ``TtChronosWeights`` always use the encoder path.
+
 The device-resident path orders tokens [context, future, REG] (RoPE positions follow each
 token, and unmasked attention is order-free), so the forecast rows start on a tile when the
 context patch count is a multiple of 32, and embeds all of them in one call.
@@ -138,6 +143,7 @@ class TtChronos:
         precision: TtChronosPrecision | None = None,
         *,
         l1_chunk_tokens: int | None = None,
+        fast_path_source: tuple[dict, dict] | None = None,
     ):
         """``l1_chunk_tokens`` (e.g. ``precision.l1_chunk_tokens()``) runs the encoder
         L1-resident on chunks of ``l1_chunk_tokens // padded_T`` series (rounded down
@@ -145,8 +151,12 @@ class TtChronos:
         keeps activations in DRAM.
 
         On a mesh device the model runs data parallel: weights are copied to every
-        chip and the device-resident path splits the batch along dim 0."""
+        chip and the device-resident path splits the batch along dim 0.
+
+        ``fast_path_source`` (state dict, config dict) enables the fast path of ``forward``."""
         self.device = device
+        self._fast_path_source = fast_path_source
+        self._fast_path = None
         self.num_devices = device.get_num_devices() if hasattr(device, "get_num_devices") else 1
         self.weights = weights
         self.config = config
@@ -166,13 +176,58 @@ class TtChronos:
 
     @classmethod
     def from_torch_model(
-        cls, device, model, precision: TtChronosPrecision | None = None, *, l1_chunk_tokens: int | None = None
+        cls,
+        device,
+        model,
+        precision: TtChronosPrecision | None = None,
+        *,
+        l1_chunk_tokens: int | None = None,
+        fast_path: bool = True,
     ) -> "TtChronos":
-        """Build from a reference ``Chronos2Model`` (weights + geometry)."""
+        """Build from a reference ``Chronos2Model`` (weights + geometry). ``fast_path=False`` keeps
+        every ``forward`` on the encoder path."""
         weights = TtChronosWeights.from_torch_model(model)
+        source = (model.state_dict(), model.config.to_dict()) if fast_path else None
         return cls(
-            device, weights, tt_chronos_config_from_torch_model(model), precision, l1_chunk_tokens=l1_chunk_tokens
+            device,
+            weights,
+            tt_chronos_config_from_torch_model(model),
+            precision,
+            l1_chunk_tokens=l1_chunk_tokens,
+            fast_path_source=source,
         )
+
+    def uses_fast_path(
+        self,
+        context: torch.Tensor,
+        group_ids: torch.Tensor | None = None,
+        future_covariates: torch.Tensor | None = None,
+        num_output_patches: int = 1,
+    ) -> bool:
+        """Whether ``forward`` with these arguments runs tt/fast_path.py: independent univariate
+        series inside its validated envelope, on a checkpoint geometry it implements."""
+        if self._fast_path_source is None or future_covariates is not None:
+            return False
+        if group_ids is not None and torch.unique(group_ids).numel() != group_ids.numel():
+            return False
+        from models.experimental.chronos_forecast.tt import fast_path
+
+        return (
+            context.shape[-1] <= fast_path.MAX_CONTEXT
+            and num_output_patches <= fast_path.MAX_OUTPUT_PATCHES
+            and fast_path.supports(self._fast_path_source[1])
+        )
+
+    def _fast_path_model(self):
+        """Built on first use (its own folded weights on the device): bfp8_b when the precision
+        stores bf8 weights, else bf16."""
+        if self._fast_path is None:
+            from models.experimental.chronos_forecast.tt.fast_path import TtChronosFastPath
+
+            state_dict, config = self._fast_path_source
+            precision = "bfp8_b" if self.precision.bf8_weights else "bf16"
+            self._fast_path = TtChronosFastPath(state_dict, config, self.device, precision=precision)
+        return self._fast_path
 
     def _l1_series_chunk(self, padded_seq_len: int) -> int | None:
         if self.l1_chunk_tokens is None:
@@ -556,7 +611,10 @@ class TtChronos:
         future_covariates_mask: torch.Tensor | None = None,
         num_output_patches: int = 1,
     ) -> torch.Tensor:
-        """Host-orchestrated forward. Returns quantile preds (B, Q, O*P) host float."""
+        """Returns quantile preds (B, Q, O*P) host float: the fast path when ``uses_fast_path``,
+        else host-orchestrated through the encoder modules."""
+        if self.uses_fast_path(context, group_ids, future_covariates, num_output_patches):
+            return self._fast_path_model().forward(context, context_mask, num_output_patches)
         cfg = self.config
         batch_size = context.shape[0]
 
